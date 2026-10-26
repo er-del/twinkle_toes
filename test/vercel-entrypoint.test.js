@@ -1,6 +1,13 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
+
+test("uses Vercel's Other preset so browser assets remain static", () => {
+  const config = JSON.parse(fs.readFileSync("vercel.json", "utf8"));
+  assert.equal(config.framework, null);
+  assert.equal(config.outputDirectory, "public");
+});
 
 test("loads the Vercel function entrypoint without starting a local listener", () => {
   const result = spawnSync(process.execPath, [

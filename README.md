@@ -87,7 +87,7 @@ Do not use `localhost` on the phone. That refers to the phone itself. Use the pr
 
 ## Deploying to Vercel
 
-Vercel deployments use the Node serverless function in `api/[...path].js`; the regular `npm start` server remains for self-hosting. The Vercel deployment requires an Upstash Redis REST database because serverless functions do not share in-memory state. Create a Redis database, then add `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` to the Vercel project's Environment Variables and redeploy. The shared store keeps display/controller events, conversation history, and timers across function invocations; unused room data expires after 30 days.
+Vercel deployments use the Node serverless function in `api/[...path].js`; `framework: null` in `vercel.json` selects Vercel's Other preset so `public/` remains static rather than being treated as a Node app entrypoint. The regular `npm start` server remains for self-hosting. The Vercel deployment requires an Upstash Redis REST database because serverless functions do not share in-memory state. Create a Redis database, then add `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` to the Vercel project's Environment Variables and redeploy. The shared store keeps display/controller events, conversation history, and timers across function invocations; unused room data expires after 30 days.
 
 Each browser gets a random room ID in the page URL. Open the full URL (including `?room=...`) on the display and controller devices to pair them. Treat that URL as a private access link: anyone who has it can view and control that room. Different room IDs isolate visitors' conversations and events.
 
