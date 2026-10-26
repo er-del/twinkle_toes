@@ -6,8 +6,10 @@
   const MAX_VOICE_TRANSCRIPT_CHARS = 4000;
   const SETTINGS_STORAGE_KEY = "twinkle-toes-settings-v1";
   const NOTES_STORAGE_KEY = "twinkle-toes-notes-v1";
+  const SESSION_STORAGE_KEY = "twinkle-toes-room-v1";
   const { IDLE_AFTER_MS, SLEEPY_AFTER_MS, restingMoodFor } = window.TwinkleIdleMood;
   const mode = document.body.dataset.mode;
+  const sessionId = getSessionId();
   const connection = document.querySelector("#connection-label");
   const connectionWrap = document.querySelector(".connection");
   const face = document.querySelector("#robot-face");
@@ -56,6 +58,7 @@
   let hasEntered = false;
   let toastTimer = 0;
   let speech = null;
+  let browserUtterance = null;
   let speechGeneration = 0;
   let audioPlayback = null;
   let speechAbort = null;
@@ -68,6 +71,46 @@
   let serverConfigStatus = null;
   let idleMoodTimer = 0;
   let idleSince = 0;
+
+  function getSessionId() {
+    const query = new URLSearchParams(window.location.search);
+    const roomFromUrl = query.get("room");
+    const isUuid = (value) =>
+      typeof value === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+    let room = isUuid(roomFromUrl) ? roomFromUrl : "";
+    if (!room) {
+      try {
+        const stored = localStorage.getItem(SESSION_STORAGE_KEY);
+        if (isUuid(stored)) room = stored;
+      } catch (error) {
+        console.warn("Could not read this device's room ID:", error.message);
+      }
+    }
+    if (!room) {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      room = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    }
+    try {
+      localStorage.setItem(SESSION_STORAGE_KEY, room);
+    } catch (error) {
+      console.warn("Could not save this device's room ID:", error.message);
+    }
+    if (roomFromUrl !== room) {
+      query.set("room", room);
+      window.history.replaceState(null, "", `${window.location.pathname}?${query}${window.location.hash}`);
+    }
+    document.querySelectorAll('a[href="/"], a[href="/control"]').forEach((link) => {
+      const destination = new URL(link.href);
+      destination.searchParams.set("room", room);
+      link.href = destination.href;
+    });
+    return room;
+  }
 
   let currentState = {
     expression: "idle",
@@ -272,6 +315,8 @@
           sourceHint.textContent = "Server configuration is unavailable. Reconnect before saving API settings.";
         } else if (!serverConfigStatus.chat?.enabled) {
           sourceHint.textContent = "AI chat is disabled by the server's AI_ENABLED setting.";
+        } else if (serverConfigStatus.chat.personalKeysOnly) {
+          sourceHint.textContent = "This public Vercel deployment uses Personal keys only. Server-side provider keys are unavailable to visitors.";
         } else if (source === "env") {
           const configured = serverConfigStatus.chat.providers?.find(
             (item) => item.name === serverConfigStatus.chat.defaultProvider,
@@ -432,7 +477,16 @@
       .then((data) => {
         if (!data) return;
         serverConfigStatus = data;
-        serverDefaultApiSource = data.defaultApiSource === "browser" ? "browser" : "env";
+        serverDefaultApiSource = data.chat?.personalKeysOnly || data.defaultApiSource === "browser"
+          ? "browser"
+          : "env";
+        if (data.chat?.personalKeysOnly) {
+          userSettings.apiSource = "browser";
+          sourceInputs.forEach((input) => {
+            input.disabled = input.value === "env";
+            if (input.value === "env") input.closest(".api-source-option")?.setAttribute("hidden", "");
+          });
+        }
         configuredServerSpeech = Boolean(data.speechToText?.enabled);
         acceptsBrowserSttKey = Boolean(data.speechToText?.acceptsBrowserKey);
         if (!userSettings.apiSource && !sourceWasChanged) {
@@ -534,7 +588,7 @@
       : payload;
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Twinkle-Session": sessionId },
       body: JSON.stringify(body),
     });
     const result = await response.json();
@@ -733,6 +787,8 @@
   function clearAudio() {
     speechAbort?.abort();
     speechAbort = null;
+    if (browserUtterance && "speechSynthesis" in window) window.speechSynthesis.cancel();
+    browserUtterance = null;
     audioPlayback?.pause();
     audioPlayback = null;
     if (speech?.src.startsWith("blob:")) URL.revokeObjectURL(speech.src);
@@ -785,6 +841,15 @@
       })
       .catch((error) => {
         if (error.name === "AbortError" || generation !== speechGeneration) return;
+        if ("speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined") {
+          browserUtterance = new SpeechSynthesisUtterance(text);
+          browserUtterance.lang = /[\u0900-\u097f]/.test(text) ? "hi-IN" : "en-US";
+          browserUtterance.onend = () => finishSpeech(generation);
+          browserUtterance.onerror = () => finishSpeech(generation);
+          window.speechSynthesis.speak(browserUtterance);
+          setNote("Using this browser's built-in voice.");
+          return;
+        }
         setNote(error.message, "error");
         showToast(error.message, 7000);
         finishSpeech(generation);
@@ -801,24 +866,48 @@
   });
 
   function connectEvents() {
-    const events = new EventSource("/api/events");
+    const listeners = new Map();
+    let cursor = "";
+    let stopped = false;
+    let storageWarningShown = false;
+    let retryTimer = 0;
     const on = (name, handler) => {
-      events.addEventListener(name, (event) => {
-        try {
-          handler(JSON.parse(event.data));
-        } catch (error) {
-          console.error(`Invalid ${name} event:`, error);
-        }
-      });
+      const handlers = listeners.get(name) || [];
+      handlers.push(handler);
+      listeners.set(name, handlers);
     };
 
-    events.onopen = () => {
-      connection.textContent = "Connected";
-      connectionWrap.classList.add("connected");
-    };
-    events.onerror = () => {
-      connection.textContent = "Reconnecting";
-      connectionWrap.classList.remove("connected");
+    async function poll() {
+      if (stopped) return;
+      try {
+        const response = await fetch(`/api/events${cursor ? `?since=${encodeURIComponent(cursor)}` : ""}`, {
+          cache: "no-store",
+          headers: { "X-Twinkle-Session": sessionId },
+        });
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({}));
+          throw new Error(result.error || `Event polling failed (${response.status}).`);
+        }
+        const batch = await response.json();
+        if (batch.state) setState(batch.state);
+        for (const event of batch.events || []) {
+          for (const handler of listeners.get(event.name) || []) handler(event.data);
+        }
+        cursor = batch.cursor || cursor;
+        connection.textContent = "Connected";
+        connectionWrap.classList.add("connected");
+        retryTimer = window.setTimeout(poll, batch.pollIntervalMs || 900);
+      } catch (error) {
+        connection.textContent = "Reconnecting";
+        connectionWrap.classList.remove("connected");
+        if (error.message.includes("UPSTASH_REDIS_REST_URL") && !storageWarningShown) {
+          storageWarningShown = true;
+          const message = "Vercel setup needed: add the Upstash Redis REST URL and token to the project's Environment Variables.";
+          setNote(message, "error");
+          showToast(message, 8000);
+        }
+        retryTimer = window.setTimeout(poll, 2500);
+      }
     };
 
     on("state", setState);
@@ -896,6 +985,12 @@
       }
       renderVoiceControl();
     });
+
+    poll();
+    window.addEventListener("pagehide", () => {
+      stopped = true;
+      window.clearTimeout(retryTimer);
+    }, { once: true });
   }
 
   function startLabelIdle() {
@@ -1265,6 +1360,7 @@
             headers: {
               "Content-Type": blob.type || "audio/webm",
               "X-Twinkle-Api-Source": activeApiSource(),
+              "X-Twinkle-Session": sessionId,
               ...(sttApiKey() ? { "X-Twinkle-Stt-Key": sttApiKey() } : {}),
             },
             body: blob,

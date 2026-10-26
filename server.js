@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
+const { AsyncLocalStorage } = require("node:async_hooks");
 const qr = require("qrcode-terminal");
 
 const { MOODS, ensureMoodTag, parseMood } = require("./lib/moods");
@@ -21,6 +22,7 @@ const { DEVICE_ACTION_TOOL, createDeviceAction } = require("./lib/device-actions
 const { TOOL_DEFINITIONS, executeTool } = require("./lib/companion-tools");
 const { runToolConversation } = require("./lib/tool-calling");
 const { resolveChatProvider, validateClientSettings } = require("./lib/client-settings");
+const vercelStore = require("./lib/vercel-store");
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
@@ -31,8 +33,11 @@ const MAX_CHAT_CHARS = 4000;
 const expressionList = MOODS;
 const expressions = new Set(expressionList);
 const motionList = ["float", "dance"];
+const isVercel = Boolean(process.env.VERCEL);
+const requestContext = new AsyncLocalStorage();
 
 function loadEnvFile() {
+  if (process.env.VERCEL) return;
   const filename = path.join(ROOT, ".env");
   if (!fs.existsSync(filename)) return;
 
@@ -81,10 +86,11 @@ const providers = {
 
 const providerName = (process.env.AI_PROVIDER || "groq").toLowerCase();
 const provider = providers[providerName];
-const defaultApiSource = String(process.env.API_KEY_SOURCE || "env").toLowerCase();
-if (!["env", "browser"].includes(defaultApiSource)) {
+const configuredApiSource = isVercel ? "browser" : String(process.env.API_KEY_SOURCE || "env").toLowerCase();
+if (!["env", "browser"].includes(configuredApiSource)) {
   throw new Error('API_KEY_SOURCE must be "env" or "browser".');
 }
+const defaultApiSource = isVercel ? "browser" : configuredApiSource;
 const aiEnabled = !["0", "false", "off"].includes(String(process.env.AI_ENABLED || "1").toLowerCase());
 if (aiEnabled && !provider) {
   throw new Error(`Unknown AI_PROVIDER "${providerName}". Choose groq, nvidia, or opencode-zen.`);
@@ -117,25 +123,41 @@ const serverState = {
   line: "Hi! I'm Twinkle Toes. Ready when you are.",
   status: "Ready",
 };
-const clients = new Set();
+const recentEvents = [];
 const conversationHistory = [];
 const activeTimers = new Map();
 
-function publish(name, data) {
-  const message = `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const client of clients) {
-    try {
-      client.write(message);
-    } catch (error) {
-      clients.delete(client);
-      console.error("Unable to send an event to a connected client:", error.message);
-    }
-  }
+function currentState() {
+  return requestContext.getStore()?.state || serverState;
 }
 
-function updateState(changes) {
-  Object.assign(serverState, changes);
-  publish("state", serverState);
+function currentStore() {
+  return requestContext.getStore()?.store;
+}
+
+async function publish(name, data) {
+  const event = { id: randomUUID(), name, data };
+  recentEvents.push(event);
+  recentEvents.splice(0, Math.max(0, recentEvents.length - 100));
+  if (isVercel) await currentStore().appendEvent(event);
+}
+
+async function updateState(changes) {
+  const state = currentState();
+  Object.assign(state, changes);
+  if (isVercel) await currentStore().setState(changes);
+  await publish("state", state);
+}
+
+async function settleDueTimers() {
+  if (!isVercel) return;
+  const store = currentStore();
+  for (const { serialized, timer } of await store.dueTimers()) {
+    if (await store.claimTimerCompletion(timer.id)) {
+      await publish("timer-complete", timer);
+    }
+    await store.removeTimer(serialized);
+  }
 }
 
 function json(response, status, value) {
@@ -234,7 +256,7 @@ async function requestChat(messages, tools, chatProvider) {
       // NVIDIA Nemotron 3.5 reasons by default and leaves no content within max_tokens.
       ...(chatProvider.name === "nvidia" ? { chat_template_kwargs: { enable_thinking: false } } : {}),
     }),
-    signal: AbortSignal.timeout(35_000),
+    signal: AbortSignal.timeout(isVercel ? 12_000 : 35_000),
   });
 
   if (!response.ok) {
@@ -307,8 +329,12 @@ async function runCompanionTool(call, clientSettings) {
   const result = await executeTool(name, args, {
     notes: clientSettings.notes || [],
     timers: activeTimers,
-    onTimer: (timer) => publish("timer-complete", timer),
+    deferTimer: isVercel,
+    onTimer: (timer) => publish("timer-complete", timer).catch((error) => {
+      console.error("Could not publish timer completion:", error.message);
+    }),
   });
+  if (isVercel && result.type === "timer") await currentStore().addTimer(result);
   if (result.notes) clientSettings.notes = result.notes;
   return result;
 }
@@ -667,6 +693,9 @@ async function synthesizeVoice(text, clientSettings = {}) {
           statusCode: 502,
         });
       }
+      if (isVercel) {
+        throw Object.assign(new Error(`Fish Audio generation failed: ${error.message}`), { statusCode: 502 });
+      }
       console.warn(`Fish Audio TTS failed; falling back to local Piper: ${error.message}`);
       const localAudio = await synthesizeLocalVoice(text, language);
       console.log(`Voice source: Piper fallback (${Math.round(performance.now() - startedAt)} ms)`);
@@ -674,7 +703,7 @@ async function synthesizeVoice(text, clientSettings = {}) {
     }
   }
 
-  if (activeNvidiaVoiceApiKey) {
+  if (activeNvidiaVoiceApiKey && !isVercel) {
     try {
       const audio = await synthesizeNvidiaVoice(text, language, activeNvidiaVoiceApiKey);
       console.log(`Voice source: NVIDIA ${nvidiaVoiceModel} (${language}; ${Math.round(performance.now() - startedAt)} ms)`);
@@ -688,6 +717,12 @@ async function synthesizeVoice(text, clientSettings = {}) {
       console.log(`Voice source: Piper fallback (${Math.round(performance.now() - startedAt)} ms)`);
       return { audio: localAudio, contentType: "audio/wav", engine: "piper-fallback", language };
     }
+  }
+
+  if (isVercel) {
+    throw Object.assign(new Error("Configure Fish Audio for server-generated speech, or use this browser's built-in voice."), {
+      statusCode: 503,
+    });
   }
 
   if (language === "hi") {
@@ -721,47 +756,75 @@ const staticFiles = {
 
 async function handle(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+  const cursor = url.searchParams.get("since") || "";
+  const isEventPoll = request.method === "GET" && url.pathname === "/api/events";
+  let stateLoaded = false;
 
-  if (request.method === "GET" && url.pathname === "/api/events") {
-    response.writeHead(200, {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
+  if (isVercel && ([
+    "/api/control",
+    "/api/say",
+    "/api/stop",
+    "/api/chat",
+  ].includes(url.pathname) || isEventPoll && !cursor)) {
+    Object.assign(currentState(), await currentStore().getState(currentState()));
+    stateLoaded = true;
+  }
+
+  if (isEventPoll) {
+    const localCursor = recentEvents.findIndex((event) => event.id === cursor);
+    const batch = isVercel
+      ? await vercelStore.getEventBatch(cursor)
+      : {
+          events: cursor === "0"
+            ? recentEvents
+            : cursor && localCursor >= 0
+              ? recentEvents.slice(localCursor + 1)
+              : [],
+          cursor: recentEvents.at(-1)?.id || "0",
+          reset: Boolean(cursor && cursor !== "0" && localCursor < 0),
+        };
+    await settleDueTimers();
+    if (isVercel && batch.reset && !stateLoaded) {
+      Object.assign(currentState(), await currentStore().getState(currentState()));
+      stateLoaded = true;
+    }
+    json(response, 200, {
+      ...batch,
+      ...(stateLoaded ? { state: currentState() } : {}),
+      pollIntervalMs: isVercel ? 2500 : 900,
     });
-    response.write("retry: 2000\n\n");
-    response.write(`event: state\ndata: ${JSON.stringify(serverState)}\n\n`);
-    clients.add(response);
-    request.on("close", () => clients.delete(response));
     return;
   }
 
   if (request.method === "GET" && url.pathname === "/api/status") {
     json(response, 200, {
       defaultApiSource,
+      sharedStateConfigured: !isVercel || vercelStore.isConfigured(),
       chat: {
         enabled: aiEnabled,
-        configured: getProviderStatus().configured,
+        configured: !isVercel && getProviderStatus().configured,
+        personalKeysOnly: isVercel,
         defaultProvider: providerName,
         providers: Object.entries(providers).map(([name, item]) => ({
           name,
           model: item.model,
-          configured: Boolean(item.key),
+          configured: !isVercel && Boolean(item.key),
         })),
       },
       speechToText: {
-        enabled: sttEnabled && Boolean(sttApiKey),
+        enabled: !isVercel && sttEnabled && Boolean(sttApiKey),
         acceptsBrowserKey: sttEnabled,
         model: sttModel,
       },
+      realtimeTransport: "polling",
       webSearch: {
         enabled: webSearchEnabled,
-        tavilyConfigured: Boolean(tavilyApiKey),
+        tavilyConfigured: !isVercel && Boolean(tavilyApiKey),
       },
       voice: {
-        fishAudioConfigured: Boolean(fishAudioApiKey),
+        fishAudioConfigured: !isVercel && Boolean(fishAudioApiKey),
         fishAudioModel,
-        nvidiaConfigured: Boolean(nvidiaVoiceApiKey),
+        nvidiaConfigured: !isVercel && Boolean(nvidiaVoiceApiKey),
         nvidiaModel: nvidiaVoiceModel,
       },
     });
@@ -772,6 +835,10 @@ async function handle(request, response) {
     const apiSource = String(request.headers["x-twinkle-api-source"] || defaultApiSource).trim();
     if (!["env", "browser"].includes(apiSource)) {
       json(response, 400, { error: "Choose Server .env or Personal keys." });
+      return;
+    }
+    if (isVercel && apiSource !== "browser") {
+      json(response, 403, { error: "Public Vercel rooms require Personal keys." });
       return;
     }
     const browserSttKey = String(request.headers["x-twinkle-stt-key"] || "").trim();
@@ -805,6 +872,10 @@ async function handle(request, response) {
     const body = await readJson(request, MAX_CHAT_BODY_BYTES);
     const clientSettings = validateClientSettings(body.settings);
     clientSettings.apiSource ??= defaultApiSource;
+    if (isVercel && clientSettings.apiSource !== "browser") {
+      json(response, 403, { error: "Public Vercel rooms require Personal keys." });
+      return;
+    }
     clientSettings.notes ??= [];
     if (typeof body.text !== "string" || !body.text.trim() || body.text.length > MAX_CHAT_CHARS) {
       json(response, 400, { error: `Speech text must be 1 to ${MAX_CHAT_CHARS} characters.` });
@@ -863,8 +934,8 @@ async function handle(request, response) {
       }
       changes.line = body.line;
     }
-    updateState(changes);
-    json(response, 200, { state: serverState });
+    await updateState(changes);
+    json(response, 200, { state: currentState() });
     return;
   }
 
@@ -876,52 +947,58 @@ async function handle(request, response) {
     }
     const text = body.text.trim();
     const expression = expressions.has(body.expression) ? body.expression : "speaking";
-    updateState({ expression, speaking: true, line: text, status: "Speaking" });
-    publish("speech", { text });
+    await updateState({ expression, speaking: true, line: text, status: "Speaking" });
+    await publish("speech", { text });
     json(response, 200, { ok: true });
     return;
   }
 
   if (request.method === "POST" && url.pathname === "/api/stop") {
-    updateState({ expression: "idle", speaking: false, status: "Ready" });
-    publish("stop", {});
+    await updateState({ expression: "idle", speaking: false, status: "Ready" });
+    await publish("stop", {});
     json(response, 200, { ok: true });
     return;
   }
 
   if (request.method === "POST" && url.pathname === "/api/chat") {
-    const body = await readJson(request);
+    const body = await readJson(request, MAX_CHAT_BODY_BYTES);
     const clientSettings = validateClientSettings(body.settings);
     clientSettings.apiSource ??= defaultApiSource;
+    if (isVercel && clientSettings.apiSource !== "browser") {
+      json(response, 403, { error: "Public Vercel rooms require Personal keys." });
+      return;
+    }
     if (typeof body.message !== "string" || !body.message.trim() || body.message.length > MAX_CHAT_CHARS) {
       json(response, 400, { error: `Message must be 1 to ${MAX_CHAT_CHARS} characters.` });
       return;
     }
-    publish("user-message", { text: body.message.trim() });
-    updateState({ expression: "thinking", speaking: false, status: "Thinking" });
+    await publish("user-message", { text: body.message.trim() });
+    await updateState({ expression: "thinking", speaking: false, status: "Thinking" });
     try {
       const requestedLanguage = typeof body.language === "string" ? body.language : "";
       const startedAt = performance.now();
       const message = body.message.trim();
+      const history = isVercel ? await currentStore().getHistory() : conversationHistory;
       const { reply, mood, language, deviceActions, graphics, timers, notes } = await getReply(
         message,
         requestedLanguage,
-        recentMessages(conversationHistory),
+        recentMessages(history),
         clientSettings,
       );
-      rememberTurn(conversationHistory, message, reply);
+      rememberTurn(history, message, reply);
+      if (isVercel) await currentStore().setHistory(history);
       console.log(`AI reply: ${Math.round(performance.now() - startedAt)} ms`);
-      updateState({ expression: mood, speaking: true, line: reply, status: "Speaking" });
-      for (const action of deviceActions) publish("device-action", action);
-      for (const graphic of graphics) publish("graphic-created", graphic);
-      for (const timer of timers) publish("timer-created", timer);
-      publish("assistant", { reply, mood });
+      await updateState({ expression: mood, speaking: true, line: reply, status: "Speaking" });
+      for (const action of deviceActions) await publish("device-action", action);
+      for (const graphic of graphics) await publish("graphic-created", graphic);
+      for (const timer of timers) await publish("timer-created", timer);
+      await publish("assistant", { reply, mood });
       json(response, 200, { reply, mood, language, deviceActions, graphics, timers, notes });
     } catch (error) {
       console.error("Chat failed:", error.message);
       const publicError = "Twinkle Toes is taking a moment. Please try again.";
-      updateState({ expression: "confused", speaking: false, line: publicError, status: "Taking a moment" });
-      publish("chat-error", { error: publicError });
+      await updateState({ expression: "confused", speaking: false, line: publicError, status: "Taking a moment" });
+      await publish("chat-error", { error: publicError });
       json(response, 502, { error: publicError });
     }
     return;
@@ -951,24 +1028,47 @@ const requestHandler = (request, response) => {
     "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; manifest-src 'self'; base-uri 'self'; frame-ancestors 'none'",
   );
 
-  handle(request, response).catch((error) => {
-    console.error("Request failed:", error.message);
-    if (!response.headersSent) {
-      json(response, error.statusCode || 500, { error: error.message || "Internal server error." });
-    } else {
-      response.end();
+  const sharedStatePaths = new Set([
+    "/api/events",
+    "/api/control",
+    "/api/say",
+    "/api/stop",
+    "/api/chat",
+  ]);
+  const requestPath = new URL(request.url, `http://${request.headers.host || "localhost"}`).pathname;
+  const context = {
+    state: isVercel ? { ...serverState } : serverState,
+    store: null,
+  };
+  if (isVercel && sharedStatePaths.has(requestPath)) {
+    try {
+      context.store = vercelStore.forSession(request.headers["x-twinkle-session"]);
+    } catch (error) {
+      json(response, error.statusCode || 400, { error: error.message });
+      return;
     }
+  }
+
+  requestContext.run(context, () => {
+    handle(request, response).catch((error) => {
+      console.error("Request failed:", error.message);
+      if (!response.headersSent) {
+        json(response, error.statusCode || 500, { error: error.message || "Internal server error." });
+      } else {
+        response.end();
+      }
+    });
   });
 };
 
-if (Boolean(httpsKeyPath) !== Boolean(httpsCertPath)) {
+if (!isVercel && Boolean(httpsKeyPath) !== Boolean(httpsCertPath)) {
   throw new Error("Set both HTTPS_KEY_PATH and HTTPS_CERT_PATH to enable HTTPS.");
 }
-if (httpsKeyPath && (!fs.existsSync(path.resolve(ROOT, httpsKeyPath)) || !fs.existsSync(path.resolve(ROOT, httpsCertPath)))) {
+if (!isVercel && httpsKeyPath && (!fs.existsSync(path.resolve(ROOT, httpsKeyPath)) || !fs.existsSync(path.resolve(ROOT, httpsCertPath)))) {
   throw new Error("HTTPS is enabled but a certificate file is missing. Check HTTPS_KEY_PATH and HTTPS_CERT_PATH.");
 }
 
-const server = httpsKeyPath
+const server = isVercel ? null : httpsKeyPath
   ? https.createServer(
       {
         key: fs.readFileSync(path.resolve(ROOT, httpsKeyPath)),
@@ -993,56 +1093,62 @@ function localAddresses() {
   return [...new Set(addresses)];
 }
 
-server.listen(port, "0.0.0.0", () => {
-  console.log(`${BOT_NAME} is running. Press Ctrl+C to stop.\n`);
-  console.log(`  This computer: ${protocol}://localhost:${port}`);
-  console.log(`  Controller:    ${protocol}://localhost:${port}/control`);
+function startServer() {
+  server.listen(port, "0.0.0.0", () => {
+    console.log(`${BOT_NAME} is running. Press Ctrl+C to stop.\n`);
+    console.log(`  This computer: ${protocol}://localhost:${port}`);
+    console.log(`  Controller:    ${protocol}://localhost:${port}/control`);
 
-  const addresses = localAddresses();
-  if (addresses.length === 0) {
-    console.log("\nNo LAN IPv4 address found. Connect this computer to Wi-Fi and restart.");
-  }
-  for (const address of addresses) {
-    const displayUrl = `${protocol}://${address}:${port}`;
-    console.log(`\n  Android display: ${displayUrl}`);
-    console.log("  Scan with the Android camera:");
-    qr.generate(displayUrl, { small: true });
-  }
+    const addresses = localAddresses();
+    if (addresses.length === 0) {
+      console.log("\nNo LAN IPv4 address found. Connect this computer to Wi-Fi and restart.");
+    }
+    for (const address of addresses) {
+      const displayUrl = `${protocol}://${address}:${port}`;
+      console.log(`\n  Android display: ${displayUrl}`);
+      console.log("  Scan with the Android camera:");
+      qr.generate(displayUrl, { small: true });
+    }
 
-  const ai = getProviderStatus();
-  const aiLabel = !ai.enabled
-    ? "disabled"
-    : ai.configured
-      ? `${ai.name} / ${ai.model}`
-      : `${ai.name} selected; API key not set`;
-  console.log(`\nAI: ${aiLabel}`);
-  console.log(
-    `Web search: ${webSearchEnabled ? `Tavily (${tavilyApiKey ? "API key" : "keyless"})` : "disabled"}`,
-  );
-  console.log(
-    `Voice: Fish Audio ${fishAudioApiKey ? `(${fishAudioModel}; primary)` : "(not configured)"}; NVIDIA Chatterbox is the fallback when configured, then Piper for English`,
-  );
-  if (fishAudioApiKey && !process.env.FISH_AUDIO_REFERENCE_ID_HI) {
-    console.warn("FISH_AUDIO_REFERENCE_ID_HI is not set; Hindi speech will use the default Fish Audio voice.");
-  }
-  console.log(
-    `Speech to text: ${!sttEnabled ? "disabled" : sttApiKey ? `Groq ${sttModel}` : "ready for a browser-supplied Groq key"}`,
-  );
-  if (fs.existsSync(voiceModelPath) && fs.existsSync(voicePythonPath)) {
-    console.log("Piper fallback: installed; starts only if Fish Audio or NVIDIA Chatterbox is unavailable");
-  } else {
-    console.log("Piper fallback: not installed; run setup-voice.ps1");
-  }
-});
+    const ai = getProviderStatus();
+    const aiLabel = !ai.enabled
+      ? "disabled"
+      : ai.configured
+        ? `${ai.name} / ${ai.model}`
+        : `${ai.name} selected; API key not set`;
+    console.log(`\nAI: ${aiLabel}`);
+    console.log(
+      `Web search: ${webSearchEnabled ? `Tavily (${tavilyApiKey ? "API key" : "keyless"})` : "disabled"}`,
+    );
+    console.log(
+      `Voice: Fish Audio ${fishAudioApiKey ? `(${fishAudioModel}; primary)` : "(not configured)"}; NVIDIA Chatterbox is the fallback when configured, then Piper for English`,
+    );
+    if (fishAudioApiKey && !process.env.FISH_AUDIO_REFERENCE_ID_HI) {
+      console.warn("FISH_AUDIO_REFERENCE_ID_HI is not set; Hindi speech will use the default Fish Audio voice.");
+    }
+    console.log(
+      `Speech to text: ${!sttEnabled ? "disabled" : sttApiKey ? `Groq ${sttModel}` : "ready for a browser-supplied Groq key"}`,
+    );
+    if (fs.existsSync(voiceModelPath) && fs.existsSync(voicePythonPath)) {
+      console.log("Piper fallback: installed; starts only if Fish Audio or NVIDIA Chatterbox is unavailable");
+    } else {
+      console.log("Piper fallback: not installed; run setup-voice.ps1");
+    }
+  });
 
-server.on("error", (error) => {
-  if (error.code === "EADDRINUSE") {
-    console.error(`Port ${port} is already in use. Stop the other server or set PORT in .env.`);
-  } else {
-    console.error("Twinkle Toes could not start:", error);
-  }
-  process.exitCode = 1;
-});
+  server.on("error", (error) => {
+    if (error.code === "EADDRINUSE") {
+      console.error(`Port ${port} is already in use. Stop the other server or set PORT in .env.`);
+    } else {
+      console.error("Twinkle Toes could not start:", error);
+    }
+    process.exitCode = 1;
+  });
+}
+
+if (require.main === module) startServer();
+
+module.exports = requestHandler;
 
 function shutdown() {
   voiceWorker?.process.kill();
@@ -1050,5 +1156,5 @@ function shutdown() {
   process.exit(0);
 }
 
-process.once("SIGINT", shutdown);
+if (require.main === module) process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);

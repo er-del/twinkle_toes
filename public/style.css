@@ -154,6 +154,7 @@ body[data-mode="display"] { background: #000; }
   cursor: pointer;
   transition: border-color .18s, background .18s, transform .18s;
 }
+.api-source-option[hidden] { display: none; }
 .api-source-option:hover { border-color: rgba(197, 245, 247, .38); transform: translateY(-1px); }
 .api-source-option.selected { border-color: rgba(80, 232, 237, .62); background: linear-gradient(135deg, rgba(80, 232, 237, .12), rgba(169, 246, 207, .055)); }
 .api-source-option input { position: absolute; width: 1px; height: 1px; opacity: 0; }

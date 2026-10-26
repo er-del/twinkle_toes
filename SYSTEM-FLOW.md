@@ -4,7 +4,7 @@
 flowchart TD
     Start["Start server (npm start)"] --> Env["Load .env settings and provider keys"]
     Env --> Web["Serve display and controller over HTTP or configured HTTPS"]
-    Web --> Clients["Browser connects to /api/events (SSE) and checks /api/status"]
+    Web --> Clients["Browser polls /api/events and checks /api/status"]
     Clients --> Settings["Optional provider keys saved in this browser"]
     Clients --> Choice{"How does the person talk?"}
 
@@ -51,7 +51,7 @@ flowchart TD
     ChatRequest --> Validate
 
     subgraph Output["Reply and speech"]
-        Event["Publish reply and expression using SSE"]
+        Event["Publish reply, expression, and actions to shared event store"]
         Display["Display updates animated eyes and caption"]
         SpeechRequest["Display requests POST /api/speech"]
         LanguageVoice{"Reply language?"}
@@ -94,7 +94,7 @@ flowchart TD
 - The chat model receives **text**, not raw microphone audio. For voice input, Groq Whisper converts the recording to text first; the display shows the recognized words so they can be checked.
 - Typed controller messages skip speech recognition and enter the same chat pipeline.
 - The server adds Twinkle Toes' persona, language rules, and recent conversation before calling the selected chat model. Tavily search is optional and used when enabled and needed.
-- The display gets the reply and eye expression over server-sent events (SSE). It then requests synthesized audio separately and plays it in the browser.
+- Display and controller pages poll `/api/events` for state, replies, and actions. On Vercel, events and state are isolated by a random room ID and shared through Upstash Redis; the `room` URL parameter lets a user join the same display/controller room.
 - Voice synthesis uses Fish Audio first when configured. NVIDIA Chatterbox is used only if Fish Audio is not configured; local Piper is the English-only fallback. Hindi needs a configured online Hindi voice.
 - The bottom microphone interrupts **audio playback** and starts listening again. It does not cancel a chat-model request already running on the server.
 - When the display is inactive, it returns to idle eyes after 30 seconds and sleepy eyes after two minutes. Touch or key input wakes it; listening and replies suspend the timer.
