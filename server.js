@@ -36,6 +36,7 @@ const expressionList = MOODS;
 const expressions = new Set(expressionList);
 const motionList = ["float", "dance"];
 const isVercel = Boolean(process.env.VERCEL);
+const CHAT_REQUEST_TIMEOUT_MS = isVercel ? 25_000 : 35_000;
 const requestContext = new AsyncLocalStorage();
 
 function loadEnvFile() {
@@ -288,7 +289,7 @@ async function requestChat(messages, tools, chatProvider) {
       // NVIDIA Nemotron 3.5 reasons by default and leaves no content within max_tokens.
       ...(chatProvider.name === "nvidia" ? { chat_template_kwargs: { enable_thinking: false } } : {}),
     }),
-    signal: AbortSignal.timeout(isVercel ? 12_000 : 35_000),
+    signal: AbortSignal.timeout(CHAT_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {

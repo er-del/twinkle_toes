@@ -105,6 +105,13 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
     const rateScopes = [];
     let fishRequests = [];
     let chatRequest;
+    let currentAbortTimeoutMs;
+    let chatRequestTimeoutMs;
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    AbortSignal.timeout = (milliseconds) => {
+      currentAbortTimeoutMs = milliseconds;
+      return nativeTimeout(60_000);
+    };
     let fishUpstreamEnded = false;
     let firstAudioWrittenBeforeUpstreamEnd = false;
     global.fetch = async (url, options = {}) => {
@@ -146,6 +153,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
       }
       if (address.includes("api.groq.com/openai/v1/chat/completions")) {
         chatRequest = JSON.parse(options.body);
+        chatRequestTimeoutMs = options.signal ? currentAbortTimeoutMs : 0;
         return {
           ok: true,
           json: async () => ({ choices: [{ message: { content: "[happy] Hello there." } }] })
@@ -222,6 +230,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
         rateScopes,
         fishRequests,
         chatTools: chatRequest.tools.map((tool) => tool.function.name),
+        chatRequestTimeoutMs,
         firstAudioWrittenBeforeUpstreamEnd
       }));
     })().catch((error) => { console.error(error); process.exit(1); });
@@ -244,6 +253,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
     rateScopes,
     fishRequests,
     chatTools,
+    chatRequestTimeoutMs,
     firstAudioWrittenBeforeUpstreamEnd
   } = JSON.parse(output.slice("RESULT=".length));
   assert.equal(chat.status, 200);
@@ -255,6 +265,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
   assert.equal(hindiSpeech.body.length, 3);
   assert.deepEqual(fishRequests.map(({ latency }) => latency), ["balanced", "balanced"]);
   assert.ok(!chatTools.includes("web_search"));
+  assert.equal(chatRequestTimeoutMs, 25_000);
   assert.equal(firstAudioWrittenBeforeUpstreamEnd, true);
   assert.equal(transcription.status, 200);
   assert.equal(JSON.parse(transcription.body).text, "hello there");

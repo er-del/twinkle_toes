@@ -352,7 +352,7 @@ Confirm both devices are on the same Wi-Fi and not a guest network with client i
 Check the address starts with `https://`, the mkcert root CA is installed as a CA certificate, and the certificate includes the current LAN IP. Regenerate the certificate if the computer's IP changed. See [Microphone and HTTPS](#microphone-and-https).
 
 **AI chat returns an error.**
-Check `AI_PROVIDER` and the matching key in `.env`, then restart. NVIDIA catalogue models change; try another `NVIDIA_MODEL` if the default is unavailable. The controller's provider badge shows whether the server sees a configured key. Chat errors are also shown in the controller log.
+Check `AI_PROVIDER` and the matching key in `.env`, then restart. On Vercel, a chat-provider request can take up to 25 seconds before timing out; repeated provider delays or tool calls can still exceed the function's 60-second maximum. NVIDIA catalogue models change; try another `NVIDIA_MODEL` if the default is unavailable. The controller's provider badge shows whether the server sees a configured key. Chat errors are also shown in the controller log.
 
 **It does not search the web.**
 Check `WEB_SEARCH_ENABLED=1` in `.env` and restart. A successful search logs `Web search: <query>` and `Web search: <n> result(s)` in the server terminal. Keyless Tavily is rate-limited; add `TAVILY_API_KEY` if searches start failing. The AI may still answer directly when it thinks it already knows the answer.
