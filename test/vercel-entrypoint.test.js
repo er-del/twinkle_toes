@@ -98,6 +98,9 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
     process.env.UPSTASH_REDIS_REST_URL = "https://redis.example";
     process.env.UPSTASH_REDIS_REST_TOKEN = "test-token";
     const rateScopes = [];
+    let fishRequests = [];
+    let fishUpstreamEnded = false;
+    let firstAudioWrittenBeforeUpstreamEnd = false;
     global.fetch = async (url, options = {}) => {
       const address = String(url);
       if (address.endsWith("/pipeline")) {
@@ -118,10 +121,21 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
         return { ok: true, json: async () => ({ text: "hello there", language: "en" }) };
       }
       if (address.includes("api.fish.audio")) {
+        fishRequests.push(JSON.parse(options.body));
+        fishUpstreamEnded = false;
         return {
           ok: true,
-          headers: { get: () => "audio/mpeg" },
-          arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer
+          headers: { get: (name) => name === "content-type" ? "audio/mpeg" : null },
+          body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1]));
+              setTimeout(() => {
+                fishUpstreamEnded = true;
+                controller.enqueue(new Uint8Array([2, 3]));
+                controller.close();
+              }, 25);
+            }
+          })
         };
       }
       if (address.includes("api.groq.com/openai/v1/chat/completions")) {
@@ -149,17 +163,26 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
         const res = {
           headersSent: false,
           headers: {},
+          chunks: [],
           setHeader(name, value) { this.headers[name.toLowerCase()] = value; },
           writeHead(status, headers = {}) {
             this.statusCode = status;
             Object.entries(headers).forEach(([name, value]) => { this.headers[name.toLowerCase()] = value; });
             this.headersSent = true;
           },
+          write(value) {
+            this.chunks.push(Buffer.from(value));
+            if (path === "/api/speech" && this.chunks.length === 1) {
+              firstAudioWrittenBeforeUpstreamEnd = !fishUpstreamEnded;
+            }
+            return true;
+          },
           end(value) {
+            if (value) this.chunks.push(Buffer.from(value));
             resolve({
               status: this.statusCode,
               headers: this.headers,
-              body: Buffer.isBuffer(value) ? value.toString() : String(value || "")
+              body: Buffer.concat(this.chunks).toString()
             });
           }
         };
@@ -175,6 +198,10 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
         text: "Hello there",
         settings: { apiSource: "env" }
       }));
+      const hindiSpeech = await request("/api/speech", JSON.stringify({
+        text: "नमस्ते",
+        settings: { apiSource: "env" }
+      }));
       const transcription = await request(
         "/api/transcribe",
         Buffer.from([1, 2, 3]),
@@ -183,8 +210,11 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
       console.log("RESULT=" + JSON.stringify({
         chat,
         speech: { status: speech.status, contentType: speech.headers["content-type"], body: speech.body },
+        hindiSpeech: { status: hindiSpeech.status, contentType: hindiSpeech.headers["content-type"], body: hindiSpeech.body },
         transcription,
-        rateScopes
+        rateScopes,
+        fishRequests,
+        firstAudioWrittenBeforeUpstreamEnd
       }));
     })().catch((error) => { console.error(error); process.exit(1); });
   `;
@@ -198,15 +228,27 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
   assert.equal(result.status, 0, result.stderr);
   const output = result.stdout.split(/\r?\n/).find((line) => line.startsWith("RESULT="));
   assert.ok(output, result.stdout);
-  const { chat, speech, transcription, rateScopes } = JSON.parse(output.slice("RESULT=".length));
+  const {
+    chat,
+    speech,
+    hindiSpeech,
+    transcription,
+    rateScopes,
+    fishRequests,
+    firstAudioWrittenBeforeUpstreamEnd
+  } = JSON.parse(output.slice("RESULT=".length));
   assert.equal(chat.status, 200);
   assert.equal(JSON.parse(chat.body).reply, "Hello there.");
   assert.equal(speech.status, 200);
   assert.equal(speech.contentType, "audio/mpeg");
   assert.equal(speech.body.length, 3);
+  assert.equal(hindiSpeech.status, 200);
+  assert.equal(hindiSpeech.body.length, 3);
+  assert.deepEqual(fishRequests.map(({ latency }) => latency), ["balanced", "balanced"]);
+  assert.equal(firstAudioWrittenBeforeUpstreamEnd, true);
   assert.equal(transcription.status, 200);
   assert.equal(JSON.parse(transcription.body).text, "hello there");
-  assert.deepEqual(rateScopes.map((key) => key.split(":")[2]).sort(), ["chat", "speech", "transcribe"]);
+  assert.deepEqual(rateScopes.map((key) => key.split(":")[2]).sort(), ["chat", "speech", "speech", "transcribe"]);
 });
 
 test("polls room events through the configured Vercel store", () => {

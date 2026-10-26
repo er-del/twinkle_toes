@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { isIP } = require("node:net");
 const { spawn } = require("node:child_process");
+const { once } = require("node:events");
 const { createHash, randomUUID } = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 const qr = require("qrcode-terminal");
@@ -670,7 +671,7 @@ async function transcribeAudio(audio, contentType, apiKey) {
   };
 }
 
-async function synthesizeFishAudio(text, referenceId, apiKey) {
+async function synthesizeFishAudio(text, referenceId, apiKey, signal) {
   const response = await fetch("https://api.fish.audio/v1/tts", {
     method: "POST",
     headers: {
@@ -684,8 +685,9 @@ async function synthesizeFishAudio(text, referenceId, apiKey) {
       reference_id: referenceId,
       temperature: 0.4,
       top_p: 0.5,
+      latency: "balanced",
     }),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
   });
 
   if (!response.ok) {
@@ -699,13 +701,25 @@ async function synthesizeFishAudio(text, referenceId, apiKey) {
   if (!contentType.toLowerCase().startsWith("audio/")) {
     throw new Error(`Fish Audio returned unexpected content type "${contentType || "unknown"}".`);
   }
-  const audio = Buffer.from(await response.arrayBuffer());
-  if (audio.length === 0) throw new Error("Fish Audio returned empty audio.");
-  if (audio.length > 10 * 1024 * 1024) throw new Error("Fish Audio audio response exceeded 10 MB.");
-  return { audio, contentType, engine: "fish-audio" };
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > 10 * 1024 * 1024) {
+    throw new Error("Fish Audio audio response exceeded 10 MB.");
+  }
+  if (!response.body) throw new Error("Fish Audio returned no audio stream.");
+  const audioStream = response.body.getReader();
+  const firstChunk = await audioStream.read();
+  if (firstChunk.done || !firstChunk.value?.byteLength) {
+    throw new Error("Fish Audio returned empty audio.");
+  }
+  const audio = Buffer.from(firstChunk.value);
+  if (audio.length > 10 * 1024 * 1024) {
+    await audioStream.cancel();
+    throw new Error("Fish Audio audio response exceeded 10 MB.");
+  }
+  return { audio, audioStream, contentType, engine: "fish-audio" };
 }
 
-async function synthesizeVoice(text, clientSettings = {}) {
+async function synthesizeVoice(text, clientSettings = {}, signal) {
   const startedAt = performance.now();
   const language = detectLanguage(text);
   const useBrowserKeys = (clientSettings.apiSource || "env") === "browser";
@@ -713,12 +727,13 @@ async function synthesizeVoice(text, clientSettings = {}) {
   const activeNvidiaVoiceApiKey = useBrowserKeys ? clientSettings.nvidiaVoiceApiKey : nvidiaVoiceApiKey;
   if (activeFishAudioApiKey) {
     try {
-      const result = await synthesizeFishAudio(text, fishAudioReferenceIds[language], activeFishAudioApiKey);
+      const result = await synthesizeFishAudio(text, fishAudioReferenceIds[language], activeFishAudioApiKey, signal);
       console.log(
-        `Voice source: Fish Audio (${fishAudioModel}, ${language}; ${Math.round(performance.now() - startedAt)} ms)`,
+        `Voice source: Fish Audio (${fishAudioModel}, ${language}; first audio chunk: ${Math.round(performance.now() - startedAt)} ms)`,
       );
       return { ...result, language };
     } catch (error) {
+      if (signal?.aborted) throw error;
       if (language === "hi") {
         throw Object.assign(new Error(`Hindi speech needs Fish Audio, and generation failed: ${error.message}`), {
           statusCode: 502,
@@ -908,17 +923,45 @@ async function handle(request, response) {
     if (clientSettings.apiSource === "env" && fishAudioApiKey) {
       await enforceServerKeyRateLimit(request, "speech");
     }
+    const startedAt = performance.now();
+    const speechAbort = new AbortController();
+    response.on?.("close", () => {
+      if (!response.writableEnded) speechAbort.abort();
+    });
     try {
-      const { audio, contentType } = await synthesizeVoice(body.text.trim(), clientSettings);
+      const { audio, audioStream, contentType } = await synthesizeVoice(
+        body.text.trim(),
+        clientSettings,
+        speechAbort.signal,
+      );
       response.writeHead(200, {
         "Content-Type": contentType,
-        "Content-Length": audio.length,
         "Cache-Control": "no-store",
       });
-      response.end(audio);
+      let size = audio.length;
+      if (size > 10 * 1024 * 1024) throw new Error("Speech audio response exceeded 10 MB.");
+      if (!response.write(audio)) await once(response, "drain");
+      if (audioStream) {
+        while (true) {
+          const { done, value } = await audioStream.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 10 * 1024 * 1024) {
+            throw new Error("Speech audio response exceeded 10 MB.");
+          }
+          if (!response.write(Buffer.from(value))) await once(response, "drain");
+        }
+      }
+      response.end();
+      console.log(`Speech delivery: ${Math.round(performance.now() - startedAt)} ms`);
     } catch (error) {
+      if (speechAbort.signal.aborted) return;
       console.error("Speech failed:", error.message);
-      json(response, 503, { error: "Twinkle Toes cannot speak right now. Please try again." });
+      if (response.headersSent) {
+        response.destroy(error);
+      } else {
+        json(response, 503, { error: "Twinkle Toes cannot speak right now. Please try again." });
+      }
     }
     return;
   }

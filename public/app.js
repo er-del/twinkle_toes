@@ -814,6 +814,77 @@
     renderVoiceControl();
   }
 
+  function attachAudio(audio, generation) {
+    speech = audio;
+    audioPlayback = audio;
+    audio.onended = () => finishSpeech(generation);
+    audio.onerror = () => {
+      if (generation !== speechGeneration) return;
+      setNote("The audio could not play on this device.", "error");
+      finishSpeech(generation);
+    };
+  }
+
+  async function playSpeechResponse(response, generation) {
+    const contentType = (response.headers.get("content-type") || "").split(";")[0].trim();
+    if (!response.body || typeof window.MediaSource !== "function" ||
+      !window.MediaSource.isTypeSupported(contentType)) {
+      const audio = new Audio(URL.createObjectURL(await response.blob()));
+      attachAudio(audio, generation);
+      return audio.play();
+    }
+
+    const mediaSource = new window.MediaSource();
+    const audio = new Audio(URL.createObjectURL(mediaSource));
+    attachAudio(audio, generation);
+    await new Promise((resolve, reject) => {
+      if (mediaSource.readyState === "open") {
+        resolve();
+        return;
+      }
+      mediaSource.addEventListener("sourceopen", resolve, { once: true });
+      mediaSource.addEventListener("sourceclose", () => reject(new Error("Audio stream closed before playback.")), {
+        once: true,
+      });
+    });
+    if (generation !== speechGeneration) return;
+
+    const sourceBuffer = mediaSource.addSourceBuffer(contentType);
+    const reader = response.body.getReader();
+    let started = false;
+    while (generation === speechGeneration) {
+      const { done, value } = await reader.read();
+      if (done) {
+        if (mediaSource.readyState === "open") mediaSource.endOfStream();
+        return;
+      }
+      await new Promise((resolve, reject) => {
+        const onUpdate = () => {
+          sourceBuffer.removeEventListener("error", onError);
+          resolve();
+        };
+        const onError = () => {
+          sourceBuffer.removeEventListener("updateend", onUpdate);
+          reject(new Error("The audio stream could not be decoded."));
+        };
+        sourceBuffer.addEventListener("updateend", onUpdate, { once: true });
+        sourceBuffer.addEventListener("error", onError, { once: true });
+        try {
+          sourceBuffer.appendBuffer(value);
+        } catch (error) {
+          sourceBuffer.removeEventListener("updateend", onUpdate);
+          sourceBuffer.removeEventListener("error", onError);
+          reject(error);
+        }
+      });
+      if (!started) {
+        started = true;
+        await audio.play();
+      }
+    }
+    await reader.cancel();
+  }
+
   function speak(text) {
     if (mode !== "display" || !face || !text) return;
 
@@ -833,19 +904,8 @@
           const result = await response.json().catch(() => ({}));
           throw new Error(result.error || `Voice request failed (${response.status}).`);
         }
-        return response.blob();
-      })
-      .then((audio) => {
         if (generation !== speechGeneration) return;
-        speech = new Audio(URL.createObjectURL(audio));
-        audioPlayback = speech;
-        speech.onended = () => finishSpeech(generation);
-        speech.onerror = () => {
-          if (generation !== speechGeneration) return;
-          setNote("The audio could not play on this device.", "error");
-          finishSpeech(generation);
-        };
-        return speech.play();
+        return playSpeechResponse(response, generation);
       })
       .catch((error) => {
         if (error.name === "AbortError" || generation !== speechGeneration) return;

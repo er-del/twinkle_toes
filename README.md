@@ -183,13 +183,13 @@ If Fish Audio is unavailable or fails for an English request, the server logs th
 
 The fallback model (about 63 MB) and Python runtime are stored in Git-ignored folders. Piper does not load at server startup; its worker starts only when network voices are unavailable and an English fallback is needed. That first fallback request takes longer while Piper loads. Piper is English-only, so Hindi speech returns an error when no configured network voice is available instead of mispronouncing the text.
 
-The server returns Fish Audio MP3 when successful, or NVIDIA Chatterbox/Piper WAV when those fallbacks are used. The phone plays each format directly; Android text-to-speech is not used. AI chat still needs its separately configured AI provider.
+Fish Audio uses its balanced-latency mode and streams MP3 chunks through the server so supported browsers can start playback before the full reply is generated. Browsers without MP3 Media Source support fall back to buffering the complete clip before playback. Other configured voices return WAV. Android text-to-speech is not used. AI chat still needs its separately configured AI provider.
 
 **Privacy:** when Fish Audio or NVIDIA Chatterbox is configured, the text to be spoken is sent to that provider and the generated audio is returned. The Piper fallback generates speech entirely on this computer. Chat messages go to the selected AI provider. See [Security and privacy](#security-and-privacy).
 
 ## Speech recognition
 
-The display records speech with the browser's `MediaRecorder`, using a simple silence detector that submits after 500 ms of silence. Recordings longer than 20 seconds are transcribed in separate pieces and combined into one message before the AI replies (up to 4,000 characters). The server forwards each piece to Groq Whisper (`whisper-large-v3-turbo` by default), which returns text and the detected language. Hindi speech comes back in Devanagari, which the AI answers in Hindi and the Hindi Chatterbox or Fish Audio voice reads. Transcription, AI generation, and voice generation depend on network and provider response times; a sub-second spoken reply cannot be guaranteed.
+The display records speech with the browser's `MediaRecorder`, using a simple silence detector that submits after 500 ms of silence. Recordings longer than 20 seconds are transcribed in separate pieces and combined into one message before the AI replies (up to 4,000 characters). The server forwards each piece to Groq Whisper (`whisper-large-v3-turbo` by default), which returns text and the detected language. Hindi speech comes back in Devanagari, which the AI answers in Hindi and the Hindi Chatterbox or Fish Audio voice reads. Fish Audio audio is streamed to supported browsers, reducing time to first playback; AI and voice provider response times still vary, so a sub-second spoken reply cannot be guaranteed.
 
 While a reply is active, the display checks for updates at least once per second, reducing the wait to start playback on Vercel; idle polling remains unchanged.
 
@@ -368,7 +368,7 @@ Set `NVIDIA_VOICE_API_KEY` or `FISH_AUDIO_REFERENCE_ID_HI` in `.env` and restart
 Piper is English-only. Hindi speech needs a working Fish Audio key, or NVIDIA Chatterbox when Fish Audio is not configured. Check the configured voice key and server log.
 
 **The reply has no voice or takes a long time.**
-Check the server log for `Speech-to-text`, `AI reply`, and `Voice source` timings to see which stage is slow. Fish Audio failures are logged before the English Piper fallback runs. Run `.\setup-voice.ps1` if `voice-models` is missing; Piper loads only when that fallback is first needed, so its first reply will take longer. Fish Audio, NVIDIA, and AI latency depend on their services and your network. The phone only plays the audio; it does not generate it.
+Check the server log for `Speech-to-text`, `AI reply`, `first audio chunk`, and `Speech delivery` timings to see which stage is slow. Fish Audio failures are logged before the English Piper fallback runs. Run `.\setup-voice.ps1` if `voice-models` is missing; Piper loads only when that fallback is first needed, so its first reply will take longer. Fish Audio, NVIDIA, and AI latency depend on their services and your network. The phone plays streamed audio when its browser supports it; otherwise it buffers the clip before playback.
 
 **Port 3000 is already in use.**
 Stop the other server or set `PORT=3001` in `.env`, then use the new port in the browser and firewall rule.
