@@ -3,8 +3,9 @@ const http = require("node:http");
 const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
+const { isIP } = require("node:net");
 const { spawn } = require("node:child_process");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 const qr = require("qrcode-terminal");
 
@@ -86,15 +87,22 @@ const providers = {
 
 const providerName = (process.env.AI_PROVIDER || "groq").toLowerCase();
 const provider = providers[providerName];
-const configuredApiSource = isVercel ? "browser" : String(process.env.API_KEY_SOURCE || "env").toLowerCase();
+const configuredApiSource = String(process.env.API_KEY_SOURCE || "env").toLowerCase();
 if (!["env", "browser"].includes(configuredApiSource)) {
   throw new Error('API_KEY_SOURCE must be "env" or "browser".');
 }
-const defaultApiSource = isVercel ? "browser" : configuredApiSource;
 const aiEnabled = !["0", "false", "off"].includes(String(process.env.AI_ENABLED || "1").toLowerCase());
 if (aiEnabled && !provider) {
   throw new Error(`Unknown AI_PROVIDER "${providerName}". Choose groq, nvidia, or opencode-zen.`);
 }
+const defaultApiSource = configuredApiSource === "env" && !provider?.key
+  ? "browser"
+  : configuredApiSource;
+const SERVER_KEY_RATE_LIMITS = {
+  chat: { perMinute: 10, perHour: 100 },
+  speech: { perMinute: 20, perHour: 200 },
+  transcribe: { perMinute: 10, perHour: 100 },
+};
 const port = Number.parseInt(process.env.PORT || "3000", 10);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be a number from 1 to 65535.");
@@ -157,6 +165,29 @@ async function settleDueTimers() {
       await publish("timer-complete", timer);
     }
     await store.removeTimer(serialized);
+  }
+}
+
+async function enforceServerKeyRateLimit(request, scope) {
+  if (!isVercel) return;
+  const limit = SERVER_KEY_RATE_LIMITS[scope];
+  const ip = String(request.headers["x-vercel-forwarded-for"] || "").trim();
+  if (!isIP(ip)) {
+    throw Object.assign(new Error("Vercel did not provide a valid client IP for rate limiting."), {
+      statusCode: 503,
+    });
+  }
+  const ipHash = createHash("sha256").update(ip).digest("hex");
+  const result = await vercelStore.consumeRateLimit(
+    scope,
+    ipHash,
+    limit.perMinute,
+    limit.perHour,
+  );
+  if (!result.allowed) {
+    throw Object.assign(new Error("Too many requests. Please wait before trying again."), {
+      statusCode: 429,
+    });
   }
 }
 
@@ -802,27 +833,27 @@ async function handle(request, response) {
       sharedStateConfigured: !isVercel || vercelStore.isConfigured(),
       chat: {
         enabled: aiEnabled,
-        configured: !isVercel && getProviderStatus().configured,
-        personalKeysOnly: isVercel,
+        configured: getProviderStatus().configured,
+        personalKeysOnly: false,
         defaultProvider: providerName,
         providers: Object.entries(providers).map(([name, item]) => ({
           name,
           model: item.model,
-          configured: !isVercel && Boolean(item.key),
+          configured: Boolean(item.key),
         })),
       },
       speechToText: {
-        enabled: !isVercel && sttEnabled && Boolean(sttApiKey),
+        enabled: sttEnabled && Boolean(sttApiKey),
         acceptsBrowserKey: sttEnabled,
         model: sttModel,
       },
       realtimeTransport: "polling",
       webSearch: {
         enabled: webSearchEnabled,
-        tavilyConfigured: !isVercel && Boolean(tavilyApiKey),
+        tavilyConfigured: Boolean(tavilyApiKey),
       },
       voice: {
-        fishAudioConfigured: !isVercel && Boolean(fishAudioApiKey),
+        fishAudioConfigured: Boolean(fishAudioApiKey),
         fishAudioModel,
         nvidiaConfigured: !isVercel && Boolean(nvidiaVoiceApiKey),
         nvidiaModel: nvidiaVoiceModel,
@@ -835,10 +866,6 @@ async function handle(request, response) {
     const apiSource = String(request.headers["x-twinkle-api-source"] || defaultApiSource).trim();
     if (!["env", "browser"].includes(apiSource)) {
       json(response, 400, { error: "Choose Server .env or Personal keys." });
-      return;
-    }
-    if (isVercel && apiSource !== "browser") {
-      json(response, 403, { error: "Public Vercel rooms require Personal keys." });
       return;
     }
     const browserSttKey = String(request.headers["x-twinkle-stt-key"] || "").trim();
@@ -864,6 +891,7 @@ async function handle(request, response) {
       json(response, 400, { error: "The audio recording was empty." });
       return;
     }
+    if (apiSource === "env") await enforceServerKeyRateLimit(request, "transcribe");
     json(response, 200, await transcribeAudio(audio, contentType, activeSttKey));
     return;
   }
@@ -872,14 +900,13 @@ async function handle(request, response) {
     const body = await readJson(request, MAX_CHAT_BODY_BYTES);
     const clientSettings = validateClientSettings(body.settings);
     clientSettings.apiSource ??= defaultApiSource;
-    if (isVercel && clientSettings.apiSource !== "browser") {
-      json(response, 403, { error: "Public Vercel rooms require Personal keys." });
-      return;
-    }
     clientSettings.notes ??= [];
     if (typeof body.text !== "string" || !body.text.trim() || body.text.length > MAX_CHAT_CHARS) {
       json(response, 400, { error: `Speech text must be 1 to ${MAX_CHAT_CHARS} characters.` });
       return;
+    }
+    if (clientSettings.apiSource === "env" && fishAudioApiKey) {
+      await enforceServerKeyRateLimit(request, "speech");
     }
     try {
       const { audio, contentType } = await synthesizeVoice(body.text.trim(), clientSettings);
@@ -964,13 +991,12 @@ async function handle(request, response) {
     const body = await readJson(request, MAX_CHAT_BODY_BYTES);
     const clientSettings = validateClientSettings(body.settings);
     clientSettings.apiSource ??= defaultApiSource;
-    if (isVercel && clientSettings.apiSource !== "browser") {
-      json(response, 403, { error: "Public Vercel rooms require Personal keys." });
-      return;
-    }
     if (typeof body.message !== "string" || !body.message.trim() || body.message.length > MAX_CHAT_CHARS) {
       json(response, 400, { error: `Message must be 1 to ${MAX_CHAT_CHARS} characters.` });
       return;
+    }
+    if (clientSettings.apiSource === "env" && provider?.key) {
+      await enforceServerKeyRateLimit(request, "chat");
     }
     await publish("user-message", { text: body.message.trim() });
     await updateState({ expression: "thinking", speaking: false, status: "Thinking" });

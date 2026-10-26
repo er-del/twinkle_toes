@@ -69,6 +69,7 @@
   let toolStatusInterval = 0;
   let serverDefaultApiSource = "env";
   let serverConfigStatus = null;
+  let serverConfigPromise = null;
   let idleMoodTimer = 0;
   let idleSince = 0;
 
@@ -210,37 +211,44 @@
   }
 
   function sttApiKey() {
-    if (activeApiSource() !== "browser") return "";
+    if (configuredServerSpeech) return "";
     return userSettings.sttApiKey ||
       (userSettings.chatProvider === "groq" ? userSettings.chatApiKey : "") ||
       "";
   }
 
   function activeApiSource() {
+    if (!serverConfigStatus) return serverDefaultApiSource;
     return userSettings.apiSource || serverDefaultApiSource;
   }
 
   function refreshServerSpeech() {
-    serverSpeech = activeApiSource() === "env"
-      ? configuredServerSpeech
-      : acceptsBrowserSttKey && Boolean(sttApiKey());
+    serverSpeech = configuredServerSpeech || acceptsBrowserSttKey && Boolean(sttApiKey());
     renderVoiceControl();
   }
 
   function settingsFor(endpoint) {
     if (endpoint === "/api/chat") {
+      const apiSource = activeApiSource();
       return {
-        apiSource: activeApiSource(),
+        apiSource,
         chatProvider: userSettings.chatProvider,
         notes: loadNotes(),
-        ...(activeApiSource() === "browser" ? { chatApiKey: userSettings.chatApiKey } : {}),
-        ...(activeApiSource() === "browser" ? { tavilyApiKey: userSettings.tavilyApiKey } : {}),
+        ...(apiSource === "browser" ? { chatApiKey: userSettings.chatApiKey } : {}),
+        ...(apiSource === "browser" ? { tavilyApiKey: userSettings.tavilyApiKey } : {}),
       };
     }
     if (endpoint === "/api/speech") {
+      const useServerVoice = Boolean(serverConfigStatus?.voice?.fishAudioConfigured);
+      const useBrowserVoice = !useServerVoice &&
+        Boolean(
+          userSettings.fishAudioApiKey ||
+          userSettings.chatProvider === "nvidia" && userSettings.chatApiKey,
+        );
+      const apiSource = useServerVoice ? "env" : useBrowserVoice ? "browser" : activeApiSource();
       return {
-        apiSource: activeApiSource(),
-        ...(activeApiSource() === "browser" ? {
+        apiSource,
+        ...(apiSource === "browser" ? {
           fishAudioApiKey: userSettings.fishAudioApiKey,
           nvidiaVoiceApiKey:
             userSettings.chatProvider === "nvidia" ? userSettings.chatApiKey : "",
@@ -315,8 +323,6 @@
           sourceHint.textContent = "Server configuration is unavailable. Reconnect before saving API settings.";
         } else if (!serverConfigStatus.chat?.enabled) {
           sourceHint.textContent = "AI chat is disabled by the server's AI_ENABLED setting.";
-        } else if (serverConfigStatus.chat.personalKeysOnly) {
-          sourceHint.textContent = "This public Vercel deployment uses Personal keys only. Server-side provider keys are unavailable to visitors.";
         } else if (source === "env") {
           const configured = serverConfigStatus.chat.providers?.find(
             (item) => item.name === serverConfigStatus.chat.defaultProvider,
@@ -351,7 +357,7 @@
     }
 
     sourceInputs.forEach((input) => {
-      input.checked = (userSettings.apiSource || serverDefaultApiSource) === input.value;
+      input.checked = (serverConfigStatus ? activeApiSource() : serverDefaultApiSource) === input.value;
       input.addEventListener("change", () => {
         sourceWasChanged = true;
         renderSource();
@@ -462,8 +468,12 @@
     window.addEventListener("storage", (event) => {
       if (event.key !== SETTINGS_STORAGE_KEY) return;
       userSettings = loadUserSettings();
+      if (serverDefaultApiSource === "env") userSettings.apiSource = "env";
       refreshServerSpeech();
-      sourceInputs.forEach((input) => { input.checked = (userSettings.apiSource || serverDefaultApiSource) === input.value; });
+      const source = serverDefaultApiSource === "env"
+        ? "env"
+        : userSettings.apiSource || serverDefaultApiSource;
+      sourceInputs.forEach((input) => { input.checked = input.value === source; });
       if (providerSelect) providerSelect.value = userSettings.chatProvider || providerSelect.value;
       if (chatKey) chatKey.value = userSettings.chatApiKey || "";
       if (fishKey) fishKey.value = userSettings.fishAudioApiKey || "";
@@ -472,24 +482,16 @@
       renderSource();
     });
 
-    fetch("/api/status")
+    serverConfigPromise = fetch("/api/status")
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (!data) return;
         serverConfigStatus = data;
-        serverDefaultApiSource = data.chat?.personalKeysOnly || data.defaultApiSource === "browser"
-          ? "browser"
-          : "env";
-        if (data.chat?.personalKeysOnly) {
-          userSettings.apiSource = "browser";
-          sourceInputs.forEach((input) => {
-            input.disabled = input.value === "env";
-            if (input.value === "env") input.closest(".api-source-option")?.setAttribute("hidden", "");
-          });
-        }
+        serverDefaultApiSource = data.defaultApiSource === "browser" ? "browser" : "env";
         configuredServerSpeech = Boolean(data.speechToText?.enabled);
         acceptsBrowserSttKey = Boolean(data.speechToText?.acceptsBrowserKey);
-        if (!userSettings.apiSource && !sourceWasChanged) {
+        if (!sourceWasChanged) {
+          userSettings.apiSource = serverDefaultApiSource;
           sourceInputs.forEach((input) => { input.checked = input.value === serverDefaultApiSource; });
         }
         refreshServerSpeech();
@@ -497,10 +499,12 @@
           providerSelect.value = data.chat.defaultProvider;
         }
         renderSource();
+        return data;
       })
       .catch((error) => {
         console.warn("Could not load provider status:", error.message);
         renderSource();
+        return null;
       });
   }
 
@@ -583,6 +587,9 @@
   }
 
   async function post(endpoint, payload = {}) {
+    if ((endpoint === "/api/chat" || endpoint === "/api/speech") && serverConfigPromise) {
+      await serverConfigPromise;
+    }
     const body = endpoint === "/api/chat" || endpoint === "/api/speech"
       ? { ...payload, settings: settingsFor(endpoint) }
       : payload;
@@ -814,12 +821,13 @@
     clearAudio();
     speechAbort = new AbortController();
 
-    fetch("/api/speech", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, settings: settingsFor("/api/speech") }),
-      signal: speechAbort.signal,
-    })
+    Promise.resolve(serverConfigPromise)
+      .then(() => fetch("/api/speech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, settings: settingsFor("/api/speech") }),
+        signal: speechAbort.signal,
+      }))
       .then(async (response) => {
         if (!response.ok) {
           const result = await response.json().catch(() => ({}));
@@ -1359,7 +1367,11 @@
             method: "POST",
             headers: {
               "Content-Type": blob.type || "audio/webm",
-              "X-Twinkle-Api-Source": activeApiSource(),
+              "X-Twinkle-Api-Source": configuredServerSpeech
+                ? "env"
+                : sttApiKey()
+                  ? "browser"
+                  : activeApiSource(),
               "X-Twinkle-Session": sessionId,
               ...(sttApiKey() ? { "X-Twinkle-Stt-Key": sttApiKey() } : {}),
             },

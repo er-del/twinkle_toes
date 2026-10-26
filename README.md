@@ -91,7 +91,9 @@ Vercel deployments use the Node serverless function in `api/[...path].js`; `fram
 
 Each browser gets a random room ID in the page URL. Open the full URL (including `?room=...`) on the display and controller devices to pair them. Treat that URL as a private access link: anyone who has it can view and control that room. Different room IDs isolate visitors' conversations and events.
 
-Vercel public deployments require each visitor to use Personal keys; server-side provider keys are intentionally disabled for public requests to prevent visitors from consuming a shared secret. Set `AI_PROVIDER` and optional model variables in Vercel Environment Variables to select the provider/model defaults, but do not add API keys for public visitors. Do not upload `.env` or commit credentials. Voice uses each visitor's Fish Audio key when configured; otherwise the display falls back to its browser's built-in speech. Python Piper/NVIDIA voice workers are available only in self-hosted mode.
+Vercel can use server-side provider keys when `API_KEY_SOURCE=env` and the selected provider's key is configured. Add `AI_PROVIDER`, its matching key (`GROQ_API_KEY`, `NVIDIA_API_KEY`, or `OPENCODE_ZEN_API_KEY`), and any desired model variables to Vercel Environment Variables. If that server chat key is missing, the UI defaults to Personal keys instead. Fish Audio and Groq speech-to-text use their server keys independently when configured (`FISH_AUDIO_API_KEY`; `GROQ_API_KEY` with `STT_ENABLED=1`). Server keys stay on the server and are never sent to browsers.
+
+Because these server keys serve public requests, Vercel applies per-IP limits: chat and transcription allow 10 requests/minute and 100/hour; speech synthesis allows 20/minute and 200/hour. These limits reduce accidental or abusive usage but are not authentication; anyone can use the public app within those limits. They require the configured Upstash store. Use Personal keys mode when visitors should pay for their own provider usage. Do not upload `.env` or commit credentials. Python Piper/NVIDIA voice workers are available only in self-hosted mode; on Vercel, the browser's built-in speech is used if server TTS fails.
 
 Open Vercel pages poll for cross-device updates every 2.5 seconds while open, so function and Redis usage grows with active pages. For a display that stays connected all day, the self-hosted server is more economical.
 
@@ -99,10 +101,10 @@ Open Vercel pages poll for cross-device updates every 2.5 seconds while open, so
 
 The display and controller share a clear API source selector:
 
-- **Server .env** uses the server's configured provider, API keys, and voice settings.
+- **Server .env** uses the server's configured provider, API keys, and voice settings. It is selected by default when the server chat key exists; otherwise the UI selects Personal keys.
 - **Personal keys** uses credentials saved in that browser. Select Groq, NVIDIA, or OpenCode Zen and enter its chat key. Optional Fish Audio, Groq speech-to-text, and Tavily search keys can be supplied as well.
 
-Personal mode never falls back to server API keys. Provider model names and other model settings always come from the server's `.env`; a personal key is used with the model configured there for its provider. The optional personal Tavily key is used only for web search; search remains available without one. `API_KEY_SOURCE` sets the initial mode (`env` or `browser`); each browser can select and save its own mode. Environment API keys are never sent to the browser.
+Personal mode never falls back to server API keys for chat. Provider model names and other model settings always come from the server's `.env`; a personal key is used with the model configured there for its provider. Server Fish Audio and speech-to-text keys are selected independently when configured, so a browser chat key does not disable server voice services. The optional personal Tavily key is used only for web search; search remains available without one. `API_KEY_SOURCE` sets the initial mode (`env` or `browser`); each browser can select and save its own mode. Environment API keys are never sent to the browser.
 
 Personal keys are stored in browser local storage, not in the server's `.env`, and are sent only with requests that need them. They are not encrypted in browser storage. Use HTTPS, protect access to the device, and reset saved settings before sharing it. Vercel rooms isolate conversation and event data by the random room ID in the URL; anyone with that URL can join the room. Self-hosted mode remains a single shared room and is intended for a trusted network, not a shared public multi-user website.
 

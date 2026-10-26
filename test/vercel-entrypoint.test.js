@@ -27,6 +27,9 @@ test("loads the Vercel function entrypoint without starting a local listener", (
 test("serves status and refuses unscoped shared-state requests on Vercel", () => {
   const script = `
     process.env.VERCEL = "1";
+    process.env.API_KEY_SOURCE = "env";
+    process.env.AI_PROVIDER = "groq";
+    process.env.GROQ_API_KEY = "test-groq-key";
     process.env.UPSTASH_REDIS_REST_URL = "";
     process.env.UPSTASH_REDIS_REST_TOKEN = "";
     const { Readable } = require("node:stream");
@@ -76,11 +79,134 @@ test("serves status and refuses unscoped shared-state requests on Vercel", () =>
   assert.equal(result.status, 0, result.stderr);
   const responses = JSON.parse(result.stdout.trim());
   assert.equal(responses[0].status, 200);
-  assert.equal(JSON.parse(responses[0].body).chat.personalKeysOnly, true);
+  assert.equal(JSON.parse(responses[0].body).defaultApiSource, "env");
+  assert.equal(JSON.parse(responses[0].body).chat.configured, true);
+  assert.equal(JSON.parse(responses[0].body).chat.personalKeysOnly, false);
   assert.equal(responses[1].status, 400);
   assert.match(JSON.parse(responses[1].body).error, /session ID/);
-  assert.equal(responses[2].status, 403);
-  assert.match(JSON.parse(responses[2].body).error, /Personal keys/);
+  assert.equal(responses[2].status, 503);
+  assert.match(JSON.parse(responses[2].body).error, /valid client IP/);
+});
+
+test("uses configured environment keys for Vercel chat, speech, and transcription", () => {
+  const script = `
+    process.env.VERCEL = "1";
+    process.env.API_KEY_SOURCE = "env";
+    process.env.AI_PROVIDER = "groq";
+    process.env.GROQ_API_KEY = "test-groq-key";
+    process.env.FISH_AUDIO_API_KEY = "test-fish-key";
+    process.env.UPSTASH_REDIS_REST_URL = "https://redis.example";
+    process.env.UPSTASH_REDIS_REST_TOKEN = "test-token";
+    const rateScopes = [];
+    global.fetch = async (url, options = {}) => {
+      const address = String(url);
+      if (address.endsWith("/pipeline")) {
+        const commands = JSON.parse(options.body);
+        return { ok: true, json: async () => commands.map(() => ({ result: "OK" })) };
+      }
+      if (address === "https://redis.example") {
+        const command = JSON.parse(options.body);
+        if (command[0] === "EVAL") {
+          rateScopes.push(command[4]);
+          return { ok: true, json: async () => ({ result: [1, 1] }) };
+        }
+        if (command[0] === "GET") return { ok: true, json: async () => ({ result: null }) };
+        if (command[0] === "HGETALL") return { ok: true, json: async () => ({ result: [] }) };
+        return { ok: true, json: async () => ({ result: "OK" }) };
+      }
+      if (address.includes("/v1/audio/transcriptions")) {
+        return { ok: true, json: async () => ({ text: "hello there", language: "en" }) };
+      }
+      if (address.includes("api.fish.audio")) {
+        return {
+          ok: true,
+          headers: { get: () => "audio/mpeg" },
+          arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer
+        };
+      }
+      if (address.includes("api.groq.com/openai/v1/chat/completions")) {
+        return {
+          ok: true,
+          json: async () => ({ choices: [{ message: { content: "[happy] Hello there." } }] })
+        };
+      }
+      throw new Error("Unexpected external request.");
+    };
+    const { Readable } = require("node:stream");
+    const handler = require("./api/[...path].js");
+    const session = "a8c0020e-3d49-44fb-aab6-d4ea807eb328";
+    function request(path, body, contentType = "application/json") {
+      return new Promise((resolve) => {
+        const req = Readable.from(body ? [body] : []);
+        req.method = "POST";
+        req.url = path;
+        req.headers = {
+          host: "localhost",
+          "content-type": contentType,
+          "x-vercel-forwarded-for": "203.0.113.50",
+          ...(path === "/api/chat" ? { "x-twinkle-session": session } : {})
+        };
+        const res = {
+          headersSent: false,
+          headers: {},
+          setHeader(name, value) { this.headers[name.toLowerCase()] = value; },
+          writeHead(status, headers = {}) {
+            this.statusCode = status;
+            Object.entries(headers).forEach(([name, value]) => { this.headers[name.toLowerCase()] = value; });
+            this.headersSent = true;
+          },
+          end(value) {
+            resolve({
+              status: this.statusCode,
+              headers: this.headers,
+              body: Buffer.isBuffer(value) ? value.toString() : String(value || "")
+            });
+          }
+        };
+        handler(req, res);
+      });
+    }
+    (async () => {
+      const chat = await request("/api/chat", JSON.stringify({
+        message: "Say hello",
+        settings: { apiSource: "env" }
+      }));
+      const speech = await request("/api/speech", JSON.stringify({
+        text: "Hello there",
+        settings: { apiSource: "env" }
+      }));
+      const transcription = await request(
+        "/api/transcribe",
+        Buffer.from([1, 2, 3]),
+        "audio/webm"
+      );
+      console.log("RESULT=" + JSON.stringify({
+        chat,
+        speech: { status: speech.status, contentType: speech.headers["content-type"], body: speech.body },
+        transcription,
+        rateScopes
+      }));
+    })().catch((error) => { console.error(error); process.exit(1); });
+  `;
+  const result = spawnSync(process.execPath, ["-e", script], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, VERCEL: "1" },
+    timeout: 8000,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const output = result.stdout.split(/\r?\n/).find((line) => line.startsWith("RESULT="));
+  assert.ok(output, result.stdout);
+  const { chat, speech, transcription, rateScopes } = JSON.parse(output.slice("RESULT=".length));
+  assert.equal(chat.status, 200);
+  assert.equal(JSON.parse(chat.body).reply, "Hello there.");
+  assert.equal(speech.status, 200);
+  assert.equal(speech.contentType, "audio/mpeg");
+  assert.equal(speech.body.length, 3);
+  assert.equal(transcription.status, 200);
+  assert.equal(JSON.parse(transcription.body).text, "hello there");
+  assert.deepEqual(rateScopes.map((key) => key.split(":")[2]).sort(), ["chat", "speech", "transcribe"]);
 });
 
 test("polls room events through the configured Vercel store", () => {
