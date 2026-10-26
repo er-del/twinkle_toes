@@ -904,7 +904,11 @@
         cursor = batch.cursor || cursor;
         connection.textContent = "Connected";
         connectionWrap.classList.add("connected");
-        retryTimer = window.setTimeout(poll, batch.pollIntervalMs || 900);
+        const activeReply = waitingForReply || currentState.expression === "thinking" || currentState.speaking;
+        const pollInterval = activeReply
+          ? Math.min(batch.pollIntervalMs || 900, 1000)
+          : batch.pollIntervalMs || 900;
+        retryTimer = window.setTimeout(poll, pollInterval);
       } catch (error) {
         connection.textContent = "Reconnecting";
         connectionWrap.classList.remove("connected");

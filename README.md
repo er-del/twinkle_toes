@@ -191,6 +191,8 @@ The server returns Fish Audio MP3 when successful, or NVIDIA Chatterbox/Piper WA
 
 The display records speech with the browser's `MediaRecorder`, using a simple silence detector that submits after 500 ms of silence. Recordings longer than 20 seconds are transcribed in separate pieces and combined into one message before the AI replies (up to 4,000 characters). The server forwards each piece to Groq Whisper (`whisper-large-v3-turbo` by default), which returns text and the detected language. Hindi speech comes back in Devanagari, which the AI answers in Hindi and the Hindi Chatterbox or Fish Audio voice reads. Transcription, AI generation, and voice generation depend on network and provider response times; a sub-second spoken reply cannot be guaranteed.
 
+While a reply is active, the display checks for updates at least once per second, reducing the wait to start playback on Vercel; idle polling remains unchanged.
+
 This uses the same `GROQ_API_KEY` as the default AI provider. If the key is missing or the request fails, the display falls back to the browser's built-in speech recognition. Set `STT_ENABLED=0` to use only the browser recognizer. Override the Whisper model with `STT_MODEL`.
 
 **Privacy:** recorded audio is sent from the server computer to Groq for transcription. It is held in memory only and is not written to disk. If you do not want that, set `STT_ENABLED=0`; the browser recognizer may still use its browser vendor's speech service.
