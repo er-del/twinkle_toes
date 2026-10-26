@@ -1,0 +1,6 @@
+.env
+node_modules/
+certs/
+.venv-tts/
+voice-models/
+__pycache__/

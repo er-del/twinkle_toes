@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <meta name="description" content="Twinkle Toes is a full-screen animated companion robot with a mood-aware AI and a natural voice.">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/style.css">
+    <title>Twinkle Toes</title>
+  </head>
+  <body data-mode="display" data-kiosk="off">
+    <main class="display-shell">
+      <header class="display-hud">
+        <span class="brand"><span class="brand-dot" aria-hidden="true"></span>TWINKLE <strong>TOES</strong></span>
+        <span class="connection">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connection-label">Linking</span>
+        </span>
+      </header>
+
+
+
+      <div class="voice-dock" id="voice-dock" hidden>
+        <span class="voice-dock-heard" id="voice-dock-heard" aria-live="polite" hidden></span>
+        <div class="voice-control">
+          <div class="voice-dock-copy">
+            <span class="voice-dock-kicker">TWINKLE TOES</span>
+            <span class="voice-dock-status" id="voice-dock-status" aria-live="polite">Touch to talk</span>
+          </div>
+          <button class="voice-orb" id="voice-orb" type="button" aria-label="Start listening">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" />
+              <path d="M19 11v1a7 7 0 0 1-14 0v-1m7 8v3m-4 0h8" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <details class="setup-panel" id="setup-panel" open>
+        <summary>
+          <span><span class="eyebrow">PERSONAL SETUP</span><strong>AI &amp; voice providers</strong></span>
+          <span class="setup-summary-note" id="setup-summary-note">Add your own keys or use the server defaults</span>
+        </summary>
+        <form class="setup-form" id="settings-form">
+          <label>
+            <span>Chat provider</span>
+            <select name="chatProvider" id="chat-provider">
+              <option value="groq">Groq</option>
+              <option value="nvidia">NVIDIA</option>
+              <option value="opencode-zen">OpenCode Zen</option>
+            </select>
+          </label>
+          <label>
+            <span>Chat API key <small>Optional if configured on the server</small></span>
+            <input name="chatApiKey" id="chat-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Paste the selected provider's key">
+          </label>
+          <details class="advanced-keys">
+            <summary>Voice and speech keys <span>Optional</span></summary>
+            <div class="advanced-fields">
+              <label>
+                <span>Fish Audio key <small>Enables Fish Audio voice</small></span>
+                <input name="fishAudioApiKey" id="fish-audio-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Paste your Fish Audio key">
+              </label>
+              <label>
+                <span>Groq speech key <small>Server speech recognition</small></span>
+                <input name="sttApiKey" id="stt-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Can reuse your Groq chat key">
+              </label>
+              <p class="setup-hint">Fish Audio is preferred for voice when its key is saved. Otherwise the server uses its configured NVIDIA voice or local English voice; an NVIDIA chat key is reused for NVIDIA voice. A Groq key can power speech recognition even when another chat provider is selected.</p>
+            </div>
+          </details>
+          <div class="setup-actions">
+            <label class="show-keys"><input type="checkbox" class="show-api-keys"> Show keys</label>
+            <button class="setup-save" type="submit">Save &amp; apply</button>
+            <button class="setup-clear" type="button" id="clear-settings">Clear saved keys</button>
+          </div>
+          <p class="setup-status" id="settings-status" role="status" aria-live="polite">Keys stay in this browser's local storage and are sent to this server to make provider requests. Use HTTPS on shared networks; do not use this local setup as a public multi-user service.</p>
+        </form>
+      </details>
+
+      <section class="robot-stage" aria-label="Twinkle Toes animated face">
+        <div class="robot-motion" id="robot-motion" data-motion="float">
+          <canvas
+            class="robot-head"
+            id="robot-face"
+            width="466"
+            height="466"
+            data-expression="idle"
+            aria-label="Twinkle Toes animated eyes"
+          >Animated eyes require Canvas support.</canvas>
+        </div>
+      </section>
+
+      <section class="wake-panel" id="wake-panel" aria-labelledby="wake-title">
+        <p class="wake-eyebrow"><span class="signal-dot" aria-hidden="true"></span>Sensory link</p>
+        <h1 id="wake-title">Wake Twinkle Toes.</h1>
+        <p class="wake-copy">Allow the microphone and motion once. Then just speak in English or Hindi; the eyes do the rest. When left alone, Twinkle Toes settles into idle, then sleepy eyes.</p>
+        <ul class="sense-list" aria-label="Access requests">
+          <li><span class="sense-name">Microphone</span><span class="sense-state" id="mic-state" data-state="idle">Required</span></li>
+          <li><span class="sense-name">Motion</span><span class="sense-state" id="motion-state" data-state="idle">Optional</span></li>
+          <li><span class="sense-name">Screen</span><span class="sense-state" id="screen-state" data-state="idle">Fullscreen + awake</span></li>
+        </ul>
+        <button class="wake-button" id="start-button" type="button"><span id="start-label">Enable &amp; enter</span></button>
+        <button class="skip-button" id="skip-button" type="button">Enter without microphone</button>
+        <p class="wake-note" id="wake-note" role="status">Mic input uses your browser; voice replies are generated by the server.</p>
+        <div class="wake-foot">
+          <a class="quiet-link" href="/control">Open controller</a>
+          <span aria-hidden="true">·</span>
+          <span>Double-tap top-right to return</span>
+        </div>
+      </section>
+
+      <section class="device-action-card" id="device-action-card" aria-live="polite" hidden>
+        <p id="device-action-title"></p>
+        <div class="device-action-buttons">
+          <button class="device-action-open" id="device-action-open" type="button">Open on this device</button>
+          <button class="device-action-dismiss" id="device-action-dismiss" type="button" aria-label="Dismiss action">Dismiss</button>
+        </div>
+      </section>
+
+      <section class="robot-caption sr-only" aria-live="polite">
+        <span id="robot-status">Ready</span>
+        <p id="robot-line">Hi! I'm Twinkle Toes. Ready when you are.</p>
+      </section>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </main>
+
+    <noscript>This display needs JavaScript enabled.</noscript>
+
+    <script src="/eye-model.js" defer></script>
+    <script src="/eye-renderer.js" defer></script>
+    <script src="/idle-mood.js" defer></script>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

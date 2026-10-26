@@ -1,0 +1,16 @@
+{
+  "name": "twinkle-toes",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Twinkle Toes: an animated robot face with a mood-aware AI, NVIDIA Chatterbox voice, fallbacks, and a Wi-Fi controller",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  }
+}

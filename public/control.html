@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#090d1a">
+    <meta name="description" content="Desktop controller for the Twinkle Toes display.">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/style.css">
+    <title>Twinkle Toes · Controller</title>
+  </head>
+  <body data-mode="control">
+    <main class="controller-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Twinkle Toes display">
+          <span class="brand-dot" aria-hidden="true"></span>
+          TWINKLE <strong>TOES</strong>
+        </a>
+        <div class="top-actions">
+          <span class="connection">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span id="connection-label">Connecting</span>
+          </span>
+          <a class="quiet-link" href="/">Display</a>
+        </div>
+      </header>
+
+      <section class="controller-heading">
+        <p class="eyebrow">REMOTE CONTROL</p>
+        <h1>Twinkle Toes, <span>your call.</span></h1>
+        <p>Keep this page open on your computer. Chat, expressions, and voice lines appear on the phone over Wi-Fi.</p>
+        <div class="helper-badge">Here to help, whenever you're ready.</div>
+      </section>
+
+      <details class="setup-panel controller-setup" id="setup-panel" open>
+        <summary>
+          <span><span class="eyebrow">PERSONAL SETUP</span><strong>AI &amp; voice providers</strong></span>
+          <span class="setup-summary-note" id="setup-summary-note">Add your own keys or use the server defaults</span>
+        </summary>
+        <form class="setup-form" id="settings-form">
+          <label>
+            <span>Chat provider</span>
+            <select name="chatProvider" id="chat-provider">
+              <option value="groq">Groq</option>
+              <option value="nvidia">NVIDIA</option>
+              <option value="opencode-zen">OpenCode Zen</option>
+            </select>
+          </label>
+          <label>
+            <span>Chat API key <small>Optional if configured on the server</small></span>
+            <input name="chatApiKey" id="chat-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Paste the selected provider's key">
+          </label>
+          <details class="advanced-keys">
+            <summary>Voice and speech keys <span>Optional</span></summary>
+            <div class="advanced-fields">
+              <label>
+                <span>Fish Audio key <small>Enables Fish Audio voice</small></span>
+                <input name="fishAudioApiKey" id="fish-audio-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Paste your Fish Audio key">
+              </label>
+              <label>
+                <span>Groq speech key <small>Server speech recognition</small></span>
+                <input name="sttApiKey" id="stt-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Can reuse your Groq chat key">
+              </label>
+              <p class="setup-hint">Fish Audio is preferred for voice when its key is saved. Otherwise the server uses its configured NVIDIA voice or local English voice; an NVIDIA chat key is reused for NVIDIA voice. A Groq key can power speech recognition even when another chat provider is selected.</p>
+            </div>
+          </details>
+          <div class="setup-actions">
+            <label class="show-keys"><input type="checkbox" class="show-api-keys"> Show keys</label>
+            <button class="setup-save" type="submit">Save &amp; apply</button>
+            <button class="setup-clear" type="button" id="clear-settings">Clear saved keys</button>
+          </div>
+          <p class="setup-status" id="settings-status" role="status" aria-live="polite">Keys stay in this browser's local storage and are sent to this server to make provider requests. Use HTTPS on shared networks; do not use this local setup as a public multi-user service.</p>
+        </form>
+      </details>
+
+      <div class="controller-grid">
+        <section class="panel chat-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">CONVERSATION</p>
+              <h2>Talk to Twinkle Toes</h2>
+            </div>
+            <button class="text-button" id="voice-button" type="button">🎙 Use voice</button>
+          </div>
+          <div class="chat-log" id="chat-log" aria-live="polite">
+            <p class="chat-note">Say or type something. Twinkle Toes answers aloud and chooses an expression for the mood.</p>
+          </div>
+          <form class="chat-form" id="chat-form">
+            <label class="sr-only" for="message-input">Message for Twinkle Toes</label>
+            <input id="message-input" name="message" maxlength="1000" placeholder="Type a message..." autocomplete="off">
+            <button class="send-button" type="submit" aria-label="Send message">➤</button>
+          </form>
+          <p class="panel-footnote" id="voice-note">
+            Voice recognition is browser-dependent. Android requires HTTPS for microphone access.
+          </p>
+        </section>
+
+        <section class="panel controls-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">LIVE DISPLAY</p>
+              <h2>Expressions</h2>
+            </div>
+          </div>
+          <div class="expression-grid" id="expression-grid">
+            <button type="button" data-expression="idle" aria-pressed="false">◉ <span>Idle</span></button>
+            <button type="button" data-expression="listening" aria-pressed="false">◖ <span>Listening</span></button>
+            <button type="button" data-expression="thinking" aria-pressed="false">◌ <span>Thinking</span></button>
+            <button type="button" data-expression="speaking" aria-pressed="false">◉ <span>Speaking</span></button>
+            <button type="button" data-expression="happy" aria-pressed="false">⌒ <span>Happy</span></button>
+            <button type="button" data-expression="excited" aria-pressed="false">✦ <span>Excited</span></button>
+            <button type="button" data-expression="curious" aria-pressed="false">◉ <span>Curious</span></button>
+            <button type="button" data-expression="confused" aria-pressed="false">◉ <span>Confused</span></button>
+            <button type="button" data-expression="angry" aria-pressed="false">◉ <span>Angry</span></button>
+            <button type="button" data-expression="surprised" aria-pressed="false">◉ <span>Surprised</span></button>
+            <button type="button" data-expression="sad" aria-pressed="false">◡ <span>Sad</span></button>
+            <button type="button" data-expression="sleepy" aria-pressed="false">⌣ <span>Sleepy</span></button>
+            <button type="button" data-expression="dizzy" aria-pressed="false">◎ <span>Dizzy</span></button>
+          </div>
+          <div class="animation-tools">
+            <div class="animation-buttons">
+              <button type="button" id="cycle-moods" aria-pressed="false">🎭 Cycle 13 moods</button>
+              <button type="button" id="dance-animation" aria-pressed="false">💃 Dance &amp; shake</button>
+            </div>
+          </div>
+          <form class="say-form" id="say-form">
+            <label for="say-input">Make Twinkle Toes speak</label>
+            <div class="input-row">
+              <input id="say-input" maxlength="240" placeholder="Type a voice line..." autocomplete="off">
+              <button class="send-button" type="submit" aria-label="Speak line">➤</button>
+            </div>
+          </form>
+          <button class="stop-button" id="stop-button" type="button">■ Stop voice and reset</button>
+        </section>
+      </div>
+      <p class="controller-footer">Works on your local Wi-Fi. Keep the server computer and Android device on the same trusted network.</p>
+    </main>
+
+    <script src="/idle-mood.js" defer></script>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
