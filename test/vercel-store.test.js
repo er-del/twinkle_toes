@@ -49,21 +49,18 @@ test("stores JSON and reads events after a cursor through the Redis REST API", a
   assert.deepEqual(commands[3].slice(-2), ["EX", "2592000"]);
 });
 
-test("pipelines state and events, and applies server-key rate limits", async (t) => {
+test("stores state and events through the Redis REST endpoint and applies rate limits", async (t) => {
   const originalFetch = global.fetch;
   const requests = [];
   let rateCount = 0;
   global.fetch = async (url, options) => {
     const body = JSON.parse(options.body);
     requests.push({ url, body });
-    if (String(url).endsWith("/pipeline")) {
-      return { ok: true, json: async () => body.map(() => ({ result: "OK" })) };
-    }
     if (body[0] === "EVAL") {
       rateCount++;
       return { ok: true, json: async () => ({ result: [rateCount, 1] }) };
     }
-    throw new Error(`Unexpected Redis command: ${body[0]}`);
+    return { ok: true, json: async () => ({ result: "OK" }) };
   };
   t.after(() => { global.fetch = originalFetch; });
   const env = {
@@ -74,9 +71,14 @@ test("pipelines state and events, and applies server-key rate limits", async (t)
 
   await sessionStore.setState({ expression: "idle" });
   await sessionStore.appendEvent({ id: "event-1", name: "assistant", data: {} });
-  assert.deepEqual(requests[0].body.map(([name]) => name), ["HSET", "EXPIRE"]);
-  assert.deepEqual(requests[1].body.map(([name]) => name), ["LPUSH", "LTRIM", "EXPIRE"]);
-  assert.ok(requests.every(({ url }) => String(url).endsWith("/pipeline")));
+  assert.deepEqual(requests.slice(0, 5).map(({ body }) => body[0]), [
+    "HSET",
+    "EXPIRE",
+    "LPUSH",
+    "LTRIM",
+    "EXPIRE",
+  ]);
+  assert.ok(requests.every(({ url }) => url === env.UPSTASH_REDIS_REST_URL));
 
   const ipHash = "a".repeat(64);
   assert.deepEqual(await store.consumeRateLimit("chat", ipHash, 1, 10, env), {
