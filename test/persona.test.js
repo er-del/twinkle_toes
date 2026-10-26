@@ -94,11 +94,11 @@ test("tells the model to use the full mood range", () => {
   for (const mood of MOODS) assert.ok(prompt.includes(mood), `missing mood: ${mood}`);
 });
 
-test("matches reply depth to the conversation without forcing short answers", () => {
+test("keeps routine replies short without cutting off requested detail", () => {
   const prompt = buildSystemPrompt({ moods: MOODS });
-  assert.match(prompt, /Match the depth of your answer to what the person actually said or asked/);
-  assert.match(prompt, /never force a one-line answer or cut off a useful thought/);
-  assert.doesNotMatch(prompt, /one or two short spoken sentences|240 characters/);
+  assert.match(prompt, /ordinary spoken replies, answer in one or two short sentences/);
+  assert.match(prompt, /Give more detail when they ask for it/);
+  assert.match(prompt, /do not omit important parts or cut off a useful explanation/);
 });
 
 test("requires a mood list", () => {

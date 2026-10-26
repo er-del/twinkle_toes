@@ -30,6 +30,7 @@ test("serves status and refuses unscoped shared-state requests on Vercel", () =>
     process.env.API_KEY_SOURCE = "env";
     process.env.AI_PROVIDER = "groq";
     process.env.GROQ_API_KEY = "test-groq-key";
+    process.env.NVIDIA_MODEL = "";
     process.env.UPSTASH_REDIS_REST_URL = "";
     process.env.UPSTASH_REDIS_REST_TOKEN = "";
     const { Readable } = require("node:stream");
@@ -82,6 +83,10 @@ test("serves status and refuses unscoped shared-state requests on Vercel", () =>
   assert.equal(JSON.parse(responses[0].body).defaultApiSource, "env");
   assert.equal(JSON.parse(responses[0].body).chat.configured, true);
   assert.equal(JSON.parse(responses[0].body).chat.personalKeysOnly, false);
+  assert.equal(
+    JSON.parse(responses[0].body).chat.providers.find((item) => item.name === "nvidia").model,
+    "deepseek-ai/deepseek-v4.1-flash"
+  );
   assert.equal(responses[1].status, 400);
   assert.match(JSON.parse(responses[1].body).error, /session ID/);
   assert.equal(responses[2].status, 503);
@@ -99,6 +104,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
     process.env.UPSTASH_REDIS_REST_TOKEN = "test-token";
     const rateScopes = [];
     let fishRequests = [];
+    let chatRequest;
     let fishUpstreamEnded = false;
     let firstAudioWrittenBeforeUpstreamEnd = false;
     global.fetch = async (url, options = {}) => {
@@ -139,6 +145,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
         };
       }
       if (address.includes("api.groq.com/openai/v1/chat/completions")) {
+        chatRequest = JSON.parse(options.body);
         return {
           ok: true,
           json: async () => ({ choices: [{ message: { content: "[happy] Hello there." } }] })
@@ -214,6 +221,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
         transcription,
         rateScopes,
         fishRequests,
+        chatTools: chatRequest.tools.map((tool) => tool.function.name),
         firstAudioWrittenBeforeUpstreamEnd
       }));
     })().catch((error) => { console.error(error); process.exit(1); });
@@ -235,6 +243,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
     transcription,
     rateScopes,
     fishRequests,
+    chatTools,
     firstAudioWrittenBeforeUpstreamEnd
   } = JSON.parse(output.slice("RESULT=".length));
   assert.equal(chat.status, 200);
@@ -245,6 +254,7 @@ test("uses configured environment keys for Vercel chat, speech, and transcriptio
   assert.equal(hindiSpeech.status, 200);
   assert.equal(hindiSpeech.body.length, 3);
   assert.deepEqual(fishRequests.map(({ latency }) => latency), ["balanced", "balanced"]);
+  assert.ok(!chatTools.includes("web_search"));
   assert.equal(firstAudioWrittenBeforeUpstreamEnd, true);
   assert.equal(transcription.status, 200);
   assert.equal(JSON.parse(transcription.body).text, "hello there");

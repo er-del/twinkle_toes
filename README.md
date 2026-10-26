@@ -117,7 +117,7 @@ Configure the provider, models, and server credentials together in `.env`. All t
 | `AI_PROVIDER` | Key variable | Default model | Notes |
 | --- | --- | --- | --- |
 | `groq` | `GROQ_API_KEY` | `openai/gpt-oss-120b` | Fast free tier. Default provider. |
-| `nvidia` | `NVIDIA_API_KEY` | Set by `NVIDIA_MODEL` | NVIDIA NIM endpoint. Reasoning is disabled for speed. |
+| `nvidia` | `NVIDIA_API_KEY` | `deepseek-ai/deepseek-v4.1-flash` | NVIDIA Build trial endpoint; tool-capable and fast, but subject to trial limits and availability. |
 | `opencode-zen` | `OPENCODE_ZEN_API_KEY` | `deepseek-v4.1-flash` | Paid model; needs account credit. |
 
 Set `GROQ_MODEL`, `NVIDIA_MODEL`, or `OPENCODE_ZEN_MODEL` in `.env`. These same model settings are used for both API sources, so the browser never changes provider model names.
@@ -140,9 +140,11 @@ Twinkle Toes can search the public web when an answer depends on current events,
 
 No setup or payment is required to start: the server uses Tavily's free keyless tier. That tier is rate-limited. For regular use, create a free key at [app.tavily.com](https://app.tavily.com) and set `TAVILY_API_KEY` in `.env`. The key stays on the server. Set `WEB_SEARCH_ENABLED=0` to keep the AI fully offline.
 
-Explicit requests such as "search the web" and questions containing time-sensitive words are searched automatically. Other messages are left to the model's judgement, so ordinary greetings and conversations do not trigger a request. A searching reply takes a little longer than a normal one; searches that the model starts itself also need one extra AI request.
+Explicit requests such as "search the web" and questions containing time-sensitive words are searched automatically. The search tool is not sent to the model for ordinary chats, avoiding unnecessary tool-choice overhead. A searching reply takes longer because it must wait for the search results.
 
-**Privacy:** the search query is sent to Tavily, outside your local network. For model-initiated searches, the query is written by the model and it is told not to include private personal information. For an explicit search request, the words of that request are used. Avoid asking Twinkle Toes to search for private information. Search snippets are treated as untrusted reference data, so instructions embedded in a web page cannot change Twinkle Toes' identity or behaviour. If search fails, the model is told to say it could not check the web rather than guess.
+**Privacy:** when a search is explicitly requested or needed for current information, the query is sent to Tavily, outside your local network. Avoid asking Twinkle Toes to search for private personal information. Search snippets are treated as untrusted reference data, so instructions embedded in a web page cannot change Twinkle Toes' identity or behaviour. If search fails, the model is told to say it could not check the web rather than guess.
+
+Routine spoken replies are kept to one or two short sentences by default. Ask for details when you want a longer answer.
 
 ## Built-in tools
 
@@ -281,7 +283,7 @@ Open `/control` on the computer.
 | `TAVILY_API_KEY` | — | Optional Tavily key for higher search limits; keyless search works without it. |
 | `FISH_AUDIO_API_KEY` | — | Primary speech API key; Fish Audio is preferred when configured. |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model override. |
-| `NVIDIA_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | NVIDIA model. |
+| `NVIDIA_MODEL` | `deepseek-ai/deepseek-v4.1-flash` | NVIDIA Build model ID. NVIDIA trial API availability and rate limits apply. |
 | `NVIDIA_VOICE_MODEL` | `chatterbox-multilingual-tts` | NVIDIA Chatterbox voice model label. |
 | `OPENCODE_ZEN_MODEL` | `deepseek-v4.1-flash` | OpenCode Zen model override. |
 | `FISH_AUDIO_MODEL` | `s2.1-pro-free` | Fish Audio TTS model override. |
