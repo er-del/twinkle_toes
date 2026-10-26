@@ -57,7 +57,7 @@ See [SYSTEM-FLOW.md](SYSTEM-FLOW.md) for a flowchart of startup, speech input, A
    GROQ_API_KEY=your_key_here
    ```
 
-   For Fish Audio speech, set `FISH_AUDIO_API_KEY`. Fish Audio is preferred whenever this key is configured. NVIDIA Chatterbox is used only when Fish Audio is not configured; `NVIDIA_VOICE_API_KEY` or `NVIDIA_API_KEY` can enable it as a fallback. Never put an API key in browser files; keys are read only by `server.js`.
+   For Fish Audio speech, set `FISH_AUDIO_API_KEY`. Fish Audio is preferred whenever this key is configured. NVIDIA Chatterbox is used only when Fish Audio is not configured; `NVIDIA_VOICE_API_KEY` or `NVIDIA_API_KEY` can enable it as a fallback. Never put server keys in browser files: `.env` credentials are read by `server.js`, while Personal keys mode sends browser-entered keys only with the requests that need them.
 
 3. (Optional) Install the local Piper fallback voice:
 
@@ -85,25 +85,30 @@ See [SYSTEM-FLOW.md](SYSTEM-FLOW.md) for a flowchart of startup, speech input, A
 
 Do not use `localhost` on the phone. That refers to the phone itself. Use the printed LAN address, for example `https://192.168.1.20:3000`.
 
-## Personal API keys
+## API configuration
 
-On the first visit to the display at `/` or controller at `/control`, expand **AI & voice providers**. Choose Groq, NVIDIA, or OpenCode Zen, paste that provider's chat key, and select **Save & apply**. Fish Audio and Groq speech-to-text keys are optional. A Groq chat key is reused for transcription unless a separate speech key is entered; an NVIDIA chat key is reused for NVIDIA voice. Existing server `.env` keys continue to work as defaults. The app uses the provider's configured default model.
+The display and controller share a clear API source selector:
 
-Keys are saved in that browser's local storage, not in the server's `.env`, and sent to the server only for provider requests that use them. They are not encrypted in browser storage. Use HTTPS, protect access to the device, and clear saved keys before sharing it. HTTPS is required for entering keys from another device over Wi-Fi. This UI is for a trusted, self-hosted installation: the server receives the keys, and the current app has no accounts or per-user conversation isolation. Do not publish this server as a shared multi-user website; that requires authentication, isolation, and additional deployment security.
+- **Server .env** uses the server's configured provider, API keys, and voice settings.
+- **Personal keys** uses credentials saved in that browser. Select Groq, NVIDIA, or OpenCode Zen and enter its chat key. Optional Fish Audio, Groq speech-to-text, and Tavily search keys can be supplied as well.
 
-Use **Clear saved keys** to remove browser-stored credentials. Server `.env` defaults are not removed. The settings screen supports the built-in Groq, NVIDIA, and OpenCode Zen chat integrations; arbitrary provider URLs are intentionally not accepted.
+Personal mode never falls back to server API keys. Provider model names and other model settings always come from the server's `.env`; a personal key is used with the model configured there for its provider. The optional personal Tavily key is used only for web search; search remains available without one. `API_KEY_SOURCE` sets the initial mode (`env` or `browser`); each browser can select and save its own mode. Environment API keys are never sent to the browser.
+
+Personal keys are stored in browser local storage, not in the server's `.env`, and are sent only with requests that need them. They are not encrypted in browser storage. Use HTTPS, protect access to the device, and reset saved settings before sharing it. This interface is for trusted, self-hosted use: the server receives the personal keys, and the app has no accounts or per-user conversation isolation. Do not expose it as a shared multi-user website without adding authentication and isolation.
+
+Use **Reset** to clear browser-stored credentials and return to the server's default API source. Supported chat providers are Groq, NVIDIA, and OpenCode Zen; arbitrary provider URLs are not accepted.
 
 ## AI providers
 
-Set a server default in `.env`, or choose a provider and enter a browser-specific key in **AI & voice providers** on the display or controller. All three supported chat providers use an OpenAI-compatible endpoint; the server picks the right options for each. See [Personal API keys](#personal-api-keys) before saving a key.
+Configure the provider, models, and server credentials together in `.env`. All three supported chat providers use an OpenAI-compatible endpoint; the server picks the right options for each. In Personal keys mode, select which configured provider's model to use and provide its key. See [API configuration](#api-configuration) before saving a key.
 
 | `AI_PROVIDER` | Key variable | Default model | Notes |
 | --- | --- | --- | --- |
 | `groq` | `GROQ_API_KEY` | `openai/gpt-oss-120b` | Fast free tier. Default provider. |
-| `nvidia` | `NVIDIA_API_KEY` | `nvidia/nemotron-3.5-lightning-30b-a3b` | Free NVIDIA NIM endpoint. Reasoning is disabled for speed. |
+| `nvidia` | `NVIDIA_API_KEY` | Set by `NVIDIA_MODEL` | NVIDIA NIM endpoint. Reasoning is disabled for speed. |
 | `opencode-zen` | `OPENCODE_ZEN_API_KEY` | `deepseek-v4.1-flash` | Paid model; needs account credit. |
 
-Override a model with `GROQ_MODEL`, `NVIDIA_MODEL`, or `OPENCODE_ZEN_MODEL`. Provider model catalogues change; if a model starts returning errors, switch to another model from that provider's catalogue.
+Set `GROQ_MODEL`, `NVIDIA_MODEL`, or `OPENCODE_ZEN_MODEL` in `.env`. These same model settings are used for both API sources, so the browser never changes provider model names.
 
 ### How the AI controls the face
 
@@ -126,6 +131,14 @@ No setup or payment is required to start: the server uses Tavily's free keyless 
 Explicit requests such as "search the web" and questions containing time-sensitive words are searched automatically. Other messages are left to the model's judgement, so ordinary greetings and conversations do not trigger a request. A searching reply takes a little longer than a normal one; searches that the model starts itself also need one extra AI request.
 
 **Privacy:** the search query is sent to Tavily, outside your local network. For model-initiated searches, the query is written by the model and it is told not to include private personal information. For an explicit search request, the words of that request are used. Avoid asking Twinkle Toes to search for private information. Search snippets are treated as untrusted reference data, so instructions embedded in a web page cannot change Twinkle Toes' identity or behaviour. If search fails, the model is told to say it could not check the web rather than guess.
+
+## Built-in tools
+
+Ask Twinkle Toes naturally to calculate arithmetic, convert common units, set a timer, save/list/delete a note, search the web, or draw a simple graphic. The controller also has small prompt shortcuts for common requests. Calculations use a restricted arithmetic parser, and drawings are made from a bounded set of safe SVG shapes directly in the app; no image-generation service or image API key is used.
+
+Timers run in the server process and notify connected app pages when they finish. They are temporary: they do not survive a server restart, and you will not receive an alert if all app pages are closed when the timer finishes.
+
+Notes are stored in the browser's local storage (up to 20 notes) and are sent to the server only with that browser's chat requests so the assistant can list or update them. They are not encrypted and are not shared between browsers or devices. Anyone with access to the device/browser profile may be able to read them, so do not save highly sensitive information.
 
 ## Voice
 
@@ -241,6 +254,7 @@ Open `/control` on the computer.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `API_KEY_SOURCE` | `env` | Initial UI mode: `env` uses server credentials; `browser` requires keys saved in each browser. |
 | `AI_PROVIDER` | `groq` | `groq`, `nvidia`, or `opencode-zen`. |
 | `AI_ENABLED` | `1` | Set to `0`, `false`, or `off` to disable AI. |
 | `GROQ_API_KEY` | — | Key for Groq; also enables server speech-to-text. |
@@ -253,7 +267,7 @@ Open `/control` on the computer.
 | `TAVILY_API_KEY` | — | Optional Tavily key for higher search limits; keyless search works without it. |
 | `FISH_AUDIO_API_KEY` | — | Primary speech API key; Fish Audio is preferred when configured. |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model override. |
-| `NVIDIA_MODEL` | `nvidia/nemotron-3.5-lightning-30b-a3b` | NVIDIA model override. |
+| `NVIDIA_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | NVIDIA model. |
 | `NVIDIA_VOICE_MODEL` | `chatterbox-multilingual-tts` | NVIDIA Chatterbox voice model label. |
 | `OPENCODE_ZEN_MODEL` | `deepseek-v4.1-flash` | OpenCode Zen model override. |
 | `FISH_AUDIO_MODEL` | `s2.1-pro-free` | Fish Audio TTS model override. |

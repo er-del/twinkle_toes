@@ -1,4 +1,4 @@
-const CACHE_NAME = "twinkle-toes-v17";
+const CACHE_NAME = "twinkle-toes-v21";
 const APP_FILES = ["/", "/control", "/style.css", "/app.js", "/eye-model.js", "/eye-renderer.js", "/idle-mood.js", "/manifest.json", "/icon.svg"];
 
 self.addEventListener("install", (event) => {

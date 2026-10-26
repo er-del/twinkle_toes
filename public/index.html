@@ -40,42 +40,70 @@
 
       <details class="setup-panel" id="setup-panel" open>
         <summary>
-          <span><span class="eyebrow">PERSONAL SETUP</span><strong>AI &amp; voice providers</strong></span>
-          <span class="setup-summary-note" id="setup-summary-note">Add your own keys or use the server defaults</span>
+          <span><span class="eyebrow">CONNECTION SETTINGS</span><strong>Choose your API source</strong></span>
+          <span class="setup-summary-note" id="setup-summary-note">Server environment</span>
         </summary>
         <form class="setup-form" id="settings-form">
-          <label>
-            <span>Chat provider</span>
-            <select name="chatProvider" id="chat-provider">
-              <option value="groq">Groq</option>
-              <option value="nvidia">NVIDIA</option>
-              <option value="opencode-zen">OpenCode Zen</option>
-            </select>
-          </label>
-          <label>
-            <span>Chat API key <small>Optional if configured on the server</small></span>
-            <input name="chatApiKey" id="chat-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Paste the selected provider's key">
-          </label>
-          <details class="advanced-keys">
-            <summary>Voice and speech keys <span>Optional</span></summary>
-            <div class="advanced-fields">
+          <fieldset class="api-source-picker">
+            <legend>Who supplies the API keys?</legend>
+            <div class="api-source-options">
+              <label class="api-source-option">
+                <input type="radio" name="apiSource" id="api-source-env" value="env">
+                <span class="api-source-option-copy"><strong>Server .env</strong><small>Use the server's configured providers and models</small></span>
+                <span class="api-source-indicator" aria-hidden="true"></span>
+              </label>
+              <label class="api-source-option">
+                <input type="radio" name="apiSource" id="api-source-browser" value="browser">
+                <span class="api-source-option-copy"><strong>Personal keys</strong><small>Use keys saved in this browser</small></span>
+                <span class="api-source-indicator" aria-hidden="true"></span>
+              </label>
+            </div>
+          </fieldset>
+          <p class="api-source-hint" id="api-source-hint" aria-live="polite">Loading server configuration…</p>
+          <div class="env-config-summary" id="env-config-summary" aria-label="Server environment configuration">
+            <div><span>CHAT MODEL</span><strong id="env-chat-model">Loading…</strong></div>
+            <div><span>VOICE</span><strong id="env-voice-model">Loading…</strong></div>
+            <div><span>SPEECH</span><strong id="env-stt-model">Loading…</strong></div>
+            <div><span>WEB SEARCH</span><strong id="env-search-model">Loading…</strong></div>
+          </div>
+          <div class="personal-provider-fields" id="personal-provider-fields" hidden>
+            <label>
+              <span>Chat provider</span>
+              <select name="chatProvider" id="chat-provider">
+                <option value="groq">Groq</option>
+                <option value="nvidia">NVIDIA</option>
+                <option value="opencode-zen">OpenCode Zen</option>
+              </select>
+            </label>
+            <label>
+              <span>Chat API key <small>Required in Personal keys mode</small></span>
+              <input name="chatApiKey" id="chat-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Paste the selected provider's key">
+            </label>
+            <details class="advanced-keys">
+              <summary>Optional voice &amp; speech keys</summary>
+              <div class="advanced-fields">
               <label>
-                <span>Fish Audio key <small>Enables Fish Audio voice</small></span>
+                <span>Fish Audio key <small>Natural voice</small></span>
                 <input name="fishAudioApiKey" id="fish-audio-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Paste your Fish Audio key">
               </label>
               <label>
-                <span>Groq speech key <small>Server speech recognition</small></span>
+                <span>Groq speech key <small>Voice recognition</small></span>
                 <input name="sttApiKey" id="stt-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Can reuse your Groq chat key">
               </label>
-              <p class="setup-hint">Fish Audio is preferred for voice when its key is saved. Otherwise the server uses its configured NVIDIA voice or local English voice; an NVIDIA chat key is reused for NVIDIA voice. A Groq key can power speech recognition even when another chat provider is selected.</p>
+              <label>
+                <span>Tavily search key <small>Optional higher search limits</small></span>
+                <input name="tavilyApiKey" id="tavily-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048" placeholder="Optional Tavily key">
+              </label>
+              <p class="setup-hint">Personal keys mode uses only keys entered here. Voice and speech keys are optional; NVIDIA and Groq chat keys can also be reused for their related services. Search works without a Tavily key.</p>
             </div>
           </details>
+          </div>
           <div class="setup-actions">
             <label class="show-keys"><input type="checkbox" class="show-api-keys"> Show keys</label>
-            <button class="setup-save" type="submit">Save &amp; apply</button>
-            <button class="setup-clear" type="button" id="clear-settings">Clear saved keys</button>
+            <button class="setup-save" type="submit">Save settings</button>
+            <button class="setup-clear" type="button" id="clear-settings">Reset</button>
           </div>
-          <p class="setup-status" id="settings-status" role="status" aria-live="polite">Keys stay in this browser's local storage and are sent to this server to make provider requests. Use HTTPS on shared networks; do not use this local setup as a public multi-user service.</p>
+          <p class="setup-status" id="settings-status" role="status" aria-live="polite">Personal keys stay in this browser. Use HTTPS and only connect to a server you trust.</p>
         </form>
       </details>
 
@@ -117,6 +145,14 @@
           <button class="device-action-open" id="device-action-open" type="button">Open on this device</button>
           <button class="device-action-dismiss" id="device-action-dismiss" type="button" aria-label="Dismiss action">Dismiss</button>
         </div>
+      </section>
+
+      <section class="graphic-display-card" id="graphic-display-card" aria-live="polite" hidden>
+        <div class="graphic-card-heading">
+          <strong id="graphic-display-title"></strong>
+          <button id="graphic-display-dismiss" type="button" aria-label="Dismiss drawing">×</button>
+        </div>
+        <div id="graphic-display-art"></div>
       </section>
 
       <section class="robot-caption sr-only" aria-live="polite">

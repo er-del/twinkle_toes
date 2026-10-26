@@ -18,11 +18,14 @@ const {
 } = require("./lib/language");
 const { MAX_QUERY_LENGTH, WEB_SEARCH_TOOL, cleanSearchQuery, searchWeb, shouldForceSearch } = require("./lib/web-search");
 const { DEVICE_ACTION_TOOL, createDeviceAction } = require("./lib/device-actions");
+const { TOOL_DEFINITIONS, executeTool } = require("./lib/companion-tools");
+const { runToolConversation } = require("./lib/tool-calling");
 const { resolveChatProvider, validateClientSettings } = require("./lib/client-settings");
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_CHAT_BODY_BYTES = 128 * 1024;
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const MAX_CHAT_CHARS = 4000;
 const expressionList = MOODS;
@@ -66,7 +69,7 @@ const providers = {
     key: process.env.NVIDIA_API_KEY,
     keyName: "NVIDIA_API_KEY",
     url: "https://integrate.api.nvidia.com/v1/chat/completions",
-    model: process.env.NVIDIA_MODEL || "nvidia/nemotron-3.5-lightning-30b-a3b",
+    model: process.env.NVIDIA_MODEL || "nvidia/nemotron-3-ultra-550b-a55b",
   },
   "opencode-zen": {
     key: process.env.OPENCODE_ZEN_API_KEY,
@@ -78,6 +81,10 @@ const providers = {
 
 const providerName = (process.env.AI_PROVIDER || "groq").toLowerCase();
 const provider = providers[providerName];
+const defaultApiSource = String(process.env.API_KEY_SOURCE || "env").toLowerCase();
+if (!["env", "browser"].includes(defaultApiSource)) {
+  throw new Error('API_KEY_SOURCE must be "env" or "browser".');
+}
 const aiEnabled = !["0", "false", "off"].includes(String(process.env.AI_ENABLED || "1").toLowerCase());
 if (aiEnabled && !provider) {
   throw new Error(`Unknown AI_PROVIDER "${providerName}". Choose groq, nvidia, or opencode-zen.`);
@@ -112,6 +119,7 @@ const serverState = {
 };
 const clients = new Set();
 const conversationHistory = [];
+const activeTimers = new Map();
 
 function publish(name, data) {
   const message = `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -138,7 +146,7 @@ function json(response, status, value) {
   response.end(JSON.stringify(value));
 }
 
-function readJson(request) {
+function readJson(request, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     let body = "";
     let received = 0;
@@ -146,7 +154,7 @@ function readJson(request) {
     request.on("data", (chunk) => {
       if (tooLarge) return;
       received += chunk.length;
-      if (received > MAX_BODY_BYTES) {
+      if (received > maxBytes) {
         tooLarge = true;
         reject(Object.assign(new Error("Request body is too large."), { statusCode: 413 }));
         request.resume();
@@ -261,10 +269,13 @@ function webSearchQuery(toolCall) {
   return query;
 }
 
-async function searchForModel(query) {
+async function searchForModel(query, clientSettings = {}) {
   try {
     console.log(`Web search: ${query}`);
-    const result = await searchWeb(query, { apiKey: tavilyApiKey });
+    const apiKey = (clientSettings.apiSource || "env") === "browser"
+      ? clientSettings.tavilyApiKey
+      : tavilyApiKey;
+    const result = await searchWeb(query, { apiKey });
     console.log(`Web search: ${result.results.length} result(s)`);
     if (result.results.length === 0) {
       return JSON.stringify({
@@ -282,6 +293,24 @@ async function searchForModel(query) {
       error: "Web search is unavailable right now. Tell the person you could not check the web, and do not guess.",
     });
   }
+}
+
+function companionTool(name) {
+  return TOOL_DEFINITIONS.find((tool) => tool.function.name === name);
+}
+
+async function runCompanionTool(call, clientSettings) {
+  const name = call?.function?.name;
+  const args = call?.function?.arguments;
+  const definition = companionTool(name);
+  if (!definition) throw new Error("The AI requested an unknown tool.");
+  const result = await executeTool(name, args, {
+    notes: clientSettings.notes || [],
+    timers: activeTimers,
+    onTimer: (timer) => publish("timer-complete", timer),
+  });
+  if (result.notes) clientSettings.notes = result.notes;
+  return result;
 }
 
 const LANGUAGE_FALLBACKS = {
@@ -321,6 +350,9 @@ async function getReply(message, requestedLanguage = "", history = [], clientSet
       reply: "I can only speak English and Hindi. Please ask me in English or Hindi.",
       language,
       deviceActions: [],
+      graphics: [],
+      timers: [],
+      notes: [],
     };
   }
   const messages = [
@@ -345,61 +377,44 @@ async function getReply(message, requestedLanguage = "", history = [], clientSet
     messages.push({
       role: "tool",
       tool_call_id: "forced-web-search",
-      content: await searchForModel(query),
+      content: await searchForModel(query, clientSettings),
     });
   }
 
-  let assistant = await askModel(messages, [
+  const tools = [
     ...(webSearchEnabled && !forceSearch ? [WEB_SEARCH_TOOL] : []),
     DEVICE_ACTION_TOOL,
-  ], chatProvider);
+    ...TOOL_DEFINITIONS,
+  ];
 
   const deviceActions = [];
-  if (Array.isArray(assistant.tool_calls) && assistant.tool_calls.length > 0) {
-    messages.push({
-      role: "assistant",
-      content: assistant.content || "",
-      tool_calls: assistant.tool_calls,
-    });
-
-    for (const [index, call] of assistant.tool_calls.entries()) {
-      let content;
-      if (index >= 2) {
-        content = JSON.stringify({
-          error: "Action limit reached. Finish the answer using the results and actions already available.",
-        });
-      } else {
-        try {
-          if (call?.function?.name === "web_search") {
-            content = await searchForModel(webSearchQuery(call));
-          } else if (call?.function?.name === "open_approved_app") {
-            deviceActions.push(createDeviceAction(call.function.arguments));
-            content =
-              "An action button is ready, but the app has not been opened. Tell the person to tap it on their device.";
-          } else {
-            throw new Error("The AI requested an unknown tool.");
-          }
-        } catch (error) {
-          if (call?.function?.name === "web_search") {
-            console.warn(`Web search failed: ${error.message}`);
-            content = JSON.stringify({
-              error: "Web search is unavailable right now. Tell the person you could not check the web, and do not guess.",
-            });
-          } else {
-            content = JSON.stringify({ error: error.message });
-          }
-        }
+  const graphics = [];
+  const timers = [];
+  const notes = [];
+  const assistant = await runToolConversation(messages, tools, chatProvider, askModel, async (call) => {
+    try {
+      if (call?.function?.name === "web_search") {
+        return await searchForModel(webSearchQuery(call), clientSettings);
       }
-      messages.push({
-        role: "tool",
-        tool_call_id: call.id || `web-search-${index}`,
-        content,
-      });
+      if (call?.function?.name === "open_approved_app") {
+        deviceActions.push(createDeviceAction(call.function.arguments));
+        return "An action button is ready, but the app has not been opened. Tell the person to tap it on their device.";
+      }
+      const result = await runCompanionTool(call, clientSettings);
+      if (result.type === "graphic") graphics.push(result);
+      if (result.type === "timer") timers.push(result);
+      if (result.type.startsWith("note")) notes.push(result);
+      return result;
+    } catch (error) {
+      if (call?.function?.name === "web_search") {
+        console.warn(`Web search failed: ${error.message}`);
+        return {
+          error: "Web search is unavailable right now. Tell the person you could not check the web, and do not guess.",
+        };
+      }
+      return { error: error.message };
     }
-
-    // Tool actions require a user tap; the model only describes the prepared button.
-    assistant = await askModel(messages, undefined, chatProvider);
-  }
+  });
 
   const raw = typeof assistant.content === "string" ? assistant.content.trim() : "";
   if (!raw) throw new Error("The AI provider returned an empty response.");
@@ -432,7 +447,7 @@ async function getReply(message, requestedLanguage = "", history = [], clientSet
     }
   }
 
-  return { mood, reply, language, deviceActions };
+  return { mood, reply, language, deviceActions, graphics, timers, notes };
 }
 
 let voiceWorker = null;
@@ -636,8 +651,9 @@ async function synthesizeFishAudio(text, referenceId, apiKey) {
 async function synthesizeVoice(text, clientSettings = {}) {
   const startedAt = performance.now();
   const language = detectLanguage(text);
-  const activeFishAudioApiKey = clientSettings.fishAudioApiKey || fishAudioApiKey;
-  const activeNvidiaVoiceApiKey = clientSettings.nvidiaVoiceApiKey || nvidiaVoiceApiKey;
+  const useBrowserKeys = (clientSettings.apiSource || "env") === "browser";
+  const activeFishAudioApiKey = useBrowserKeys ? clientSettings.fishAudioApiKey : fishAudioApiKey;
+  const activeNvidiaVoiceApiKey = useBrowserKeys ? clientSettings.nvidiaVoiceApiKey : nvidiaVoiceApiKey;
   if (activeFishAudioApiKey) {
     try {
       const result = await synthesizeFishAudio(text, fishAudioReferenceIds[language], activeFishAudioApiKey);
@@ -722,28 +738,50 @@ async function handle(request, response) {
 
   if (request.method === "GET" && url.pathname === "/api/status") {
     json(response, 200, {
+      defaultApiSource,
       chat: {
         enabled: aiEnabled,
         configured: getProviderStatus().configured,
         defaultProvider: providerName,
-        providers: Object.keys(providers),
+        providers: Object.entries(providers).map(([name, item]) => ({
+          name,
+          model: item.model,
+          configured: Boolean(item.key),
+        })),
       },
       speechToText: {
         enabled: sttEnabled && Boolean(sttApiKey),
         acceptsBrowserKey: sttEnabled,
+        model: sttModel,
       },
-      voice: { fishAudioConfigured: Boolean(fishAudioApiKey) },
+      webSearch: {
+        enabled: webSearchEnabled,
+        tavilyConfigured: Boolean(tavilyApiKey),
+      },
+      voice: {
+        fishAudioConfigured: Boolean(fishAudioApiKey),
+        fishAudioModel,
+        nvidiaConfigured: Boolean(nvidiaVoiceApiKey),
+        nvidiaModel: nvidiaVoiceModel,
+      },
     });
     return;
   }
 
   if (request.method === "POST" && url.pathname === "/api/transcribe") {
-    const clientSttKey = String(request.headers["x-twinkle-stt-key"] || "").trim();
+    const apiSource = String(request.headers["x-twinkle-api-source"] || defaultApiSource).trim();
+    if (!["env", "browser"].includes(apiSource)) {
+      json(response, 400, { error: "Choose Server .env or Personal keys." });
+      return;
+    }
+    const browserSttKey = String(request.headers["x-twinkle-stt-key"] || "").trim();
+    const clientSttKey = apiSource === "browser" ? browserSttKey : "";
     if (clientSttKey.length > 2048) {
       json(response, 400, { error: "Speech API key is too long." });
       return;
     }
-    if (!sttEnabled || !(clientSttKey || sttApiKey)) {
+    const activeSttKey = apiSource === "browser" ? clientSttKey : sttApiKey;
+    if (!sttEnabled || !activeSttKey) {
       json(response, 503, {
         error: "Speech recognition is unavailable right now.",
       });
@@ -759,13 +797,15 @@ async function handle(request, response) {
       json(response, 400, { error: "The audio recording was empty." });
       return;
     }
-    json(response, 200, await transcribeAudio(audio, contentType, clientSttKey || sttApiKey));
+    json(response, 200, await transcribeAudio(audio, contentType, activeSttKey));
     return;
   }
 
   if (request.method === "POST" && url.pathname === "/api/speech") {
-    const body = await readJson(request);
+    const body = await readJson(request, MAX_CHAT_BODY_BYTES);
     const clientSettings = validateClientSettings(body.settings);
+    clientSettings.apiSource ??= defaultApiSource;
+    clientSettings.notes ??= [];
     if (typeof body.text !== "string" || !body.text.trim() || body.text.length > MAX_CHAT_CHARS) {
       json(response, 400, { error: `Speech text must be 1 to ${MAX_CHAT_CHARS} characters.` });
       return;
@@ -852,6 +892,7 @@ async function handle(request, response) {
   if (request.method === "POST" && url.pathname === "/api/chat") {
     const body = await readJson(request);
     const clientSettings = validateClientSettings(body.settings);
+    clientSettings.apiSource ??= defaultApiSource;
     if (typeof body.message !== "string" || !body.message.trim() || body.message.length > MAX_CHAT_CHARS) {
       json(response, 400, { error: `Message must be 1 to ${MAX_CHAT_CHARS} characters.` });
       return;
@@ -862,7 +903,7 @@ async function handle(request, response) {
       const requestedLanguage = typeof body.language === "string" ? body.language : "";
       const startedAt = performance.now();
       const message = body.message.trim();
-      const { reply, mood, language, deviceActions } = await getReply(
+      const { reply, mood, language, deviceActions, graphics, timers, notes } = await getReply(
         message,
         requestedLanguage,
         recentMessages(conversationHistory),
@@ -872,8 +913,10 @@ async function handle(request, response) {
       console.log(`AI reply: ${Math.round(performance.now() - startedAt)} ms`);
       updateState({ expression: mood, speaking: true, line: reply, status: "Speaking" });
       for (const action of deviceActions) publish("device-action", action);
+      for (const graphic of graphics) publish("graphic-created", graphic);
+      for (const timer of timers) publish("timer-created", timer);
       publish("assistant", { reply, mood });
-      json(response, 200, { reply, mood, language, deviceActions });
+      json(response, 200, { reply, mood, language, deviceActions, graphics, timers, notes });
     } catch (error) {
       console.error("Chat failed:", error.message);
       const publicError = "Twinkle Toes is taking a moment. Please try again.";

@@ -5,6 +5,7 @@
   const CAPTURE_SILENCE_MS = 500;
   const MAX_VOICE_TRANSCRIPT_CHARS = 4000;
   const SETTINGS_STORAGE_KEY = "twinkle-toes-settings-v1";
+  const NOTES_STORAGE_KEY = "twinkle-toes-notes-v1";
   const { IDLE_AFTER_MS, SLEEPY_AFTER_MS, restingMoodFor } = window.TwinkleIdleMood;
   const mode = document.body.dataset.mode;
   const connection = document.querySelector("#connection-label");
@@ -28,6 +29,9 @@
   const deviceActionTitle = document.querySelector("#device-action-title");
   const deviceActionOpen = document.querySelector("#device-action-open");
   const deviceActionDismiss = document.querySelector("#device-action-dismiss");
+  const graphicDisplayCard = document.querySelector("#graphic-display-card");
+  const graphicDisplayTitle = document.querySelector("#graphic-display-title");
+  const graphicDisplayArt = document.querySelector("#graphic-display-art");
   const toast = document.querySelector("#toast");
   const approvedActionOrigins = new Set([
     "https://www.youtube.com",
@@ -57,6 +61,11 @@
   let speechAbort = null;
   let lastChatError = "";
   let userSettings = {};
+  const activeToolTimers = new Map();
+  let toolStatusMessage = "";
+  let toolStatusInterval = 0;
+  let serverDefaultApiSource = "env";
+  let serverConfigStatus = null;
   let idleMoodTimer = 0;
   let idleSince = 0;
 
@@ -94,17 +103,62 @@
     toastTimer = window.setTimeout(() => toast.classList.remove("visible"), duration);
   }
 
+  function loadNotes() {
+    let notes;
+    try {
+      notes = JSON.parse(localStorage.getItem(NOTES_STORAGE_KEY) || "[]");
+    } catch (error) {
+      console.error("Could not read saved browser notes:", error);
+      throw new Error("Saved notes could not be read from this browser.");
+    }
+    if (!Array.isArray(notes) || notes.length > 20 || notes.some((note) =>
+      !note || typeof note.id !== "string" || typeof note.title !== "string" ||
+      typeof note.text !== "string" || typeof note.createdAt !== "string"
+    )) {
+      throw new Error("Saved notes in this browser have an invalid format.");
+    }
+    return notes;
+  }
+
+  function saveChatNotes(notes) {
+    if (!Array.isArray(notes) || notes.length === 0) return;
+    const latest = notes[notes.length - 1];
+    if (!Array.isArray(latest?.notes)) return;
+    try {
+      localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(latest.notes));
+    } catch (error) {
+      console.error("Could not save browser-local notes:", error);
+      toolStatusMessage = "Could not save the note in this browser.";
+      renderToolStatus();
+      showToast(toolStatusMessage);
+      return;
+    }
+    toolStatusMessage = latest.type === "note_deleted"
+      ? "Saved note deleted on this device."
+      : latest.type === "note_saved"
+        ? "Note saved on this device."
+        : `${latest.notes.length} saved note${latest.notes.length === 1 ? "" : "s"} found on this device.`;
+    renderToolStatus();
+    if (mode === "display") showToast(toolStatusMessage);
+  }
+
   function loadUserSettings() {
     try {
       const stored = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "{}");
       if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
       return {
+        apiSource: ["env", "browser"].includes(stored.apiSource)
+          ? stored.apiSource
+          : typeof stored.chatApiKey === "string" && stored.chatApiKey.trim()
+            ? "browser"
+            : "",
         chatProvider: ["groq", "nvidia", "opencode-zen"].includes(stored.chatProvider)
           ? stored.chatProvider
           : "",
         chatApiKey: typeof stored.chatApiKey === "string" ? stored.chatApiKey : "",
         fishAudioApiKey: typeof stored.fishAudioApiKey === "string" ? stored.fishAudioApiKey : "",
         sttApiKey: typeof stored.sttApiKey === "string" ? stored.sttApiKey : "",
+        tavilyApiKey: typeof stored.tavilyApiKey === "string" ? stored.tavilyApiKey : "",
       };
     } catch (error) {
       console.warn("Could not read saved provider settings:", error.message);
@@ -113,28 +167,41 @@
   }
 
   function sttApiKey() {
+    if (activeApiSource() !== "browser") return "";
     return userSettings.sttApiKey ||
       (userSettings.chatProvider === "groq" ? userSettings.chatApiKey : "") ||
       "";
   }
 
+  function activeApiSource() {
+    return userSettings.apiSource || serverDefaultApiSource;
+  }
+
   function refreshServerSpeech() {
-    serverSpeech = configuredServerSpeech || (acceptsBrowserSttKey && Boolean(sttApiKey()));
+    serverSpeech = activeApiSource() === "env"
+      ? configuredServerSpeech
+      : acceptsBrowserSttKey && Boolean(sttApiKey());
     renderVoiceControl();
   }
 
   function settingsFor(endpoint) {
     if (endpoint === "/api/chat") {
       return {
+        apiSource: activeApiSource(),
         chatProvider: userSettings.chatProvider,
-        chatApiKey: userSettings.chatApiKey,
+        notes: loadNotes(),
+        ...(activeApiSource() === "browser" ? { chatApiKey: userSettings.chatApiKey } : {}),
+        ...(activeApiSource() === "browser" ? { tavilyApiKey: userSettings.tavilyApiKey } : {}),
       };
     }
     if (endpoint === "/api/speech") {
       return {
-        fishAudioApiKey: userSettings.fishAudioApiKey,
-        nvidiaVoiceApiKey:
-          userSettings.chatProvider === "nvidia" ? userSettings.chatApiKey : "",
+        apiSource: activeApiSource(),
+        ...(activeApiSource() === "browser" ? {
+          fishAudioApiKey: userSettings.fishAudioApiKey,
+          nvidiaVoiceApiKey:
+            userSettings.chatProvider === "nvidia" ? userSettings.chatApiKey : "",
+        } : {}),
       };
     }
     return {};
@@ -145,23 +212,112 @@
     if (!form) return;
     const panel = document.querySelector("#setup-panel");
     const providerSelect = document.querySelector("#chat-provider");
+    const sourceInputs = [...document.querySelectorAll('input[name="apiSource"]')];
+    const personalFields = document.querySelector("#personal-provider-fields");
+    const sourceHint = document.querySelector("#api-source-hint");
+    const envSummary = document.querySelector("#env-config-summary");
     const chatKey = document.querySelector("#chat-api-key");
     const fishKey = document.querySelector("#fish-audio-api-key");
     const sttKey = document.querySelector("#stt-api-key");
+    const tavilyKey = document.querySelector("#tavily-api-key");
     const status = document.querySelector("#settings-status");
     const summary = document.querySelector("#setup-summary-note");
-    const inputs = [chatKey, fishKey, sttKey].filter(Boolean);
+    const inputs = [chatKey, fishKey, sttKey, tavilyKey].filter(Boolean);
     let providerWasChanged = false;
+    let sourceWasChanged = false;
     userSettings = loadUserSettings();
 
+    function renderEnvConfig(source) {
+      if (!envSummary) return;
+      envSummary.hidden = source !== "env";
+      const setText = (id, text) => {
+        const element = document.querySelector(id);
+        if (element) element.textContent = text;
+      };
+      if (!serverConfigStatus) {
+        ["#env-chat-model", "#env-voice-model", "#env-stt-model", "#env-search-model"]
+          .forEach((id) => setText(id, "Unavailable"));
+        return;
+      }
+      const config = serverConfigStatus;
+      const chatConfigured = config.chat?.providers?.find(
+        (item) => item.name === config.chat.defaultProvider,
+      )?.configured;
+      setText("#env-chat-model", !config.chat?.enabled
+        ? "AI disabled"
+        : `${config.chat.defaultProvider} · ${serverStatusModel(config.chat.defaultProvider)} · ${chatConfigured ? "key ready" : "key missing"}`);
+      setText("#env-voice-model", config.voice?.fishAudioConfigured
+        ? `Fish Audio · ${config.voice.fishAudioModel} · ready`
+        : config.voice?.nvidiaConfigured
+          ? `NVIDIA · ${config.voice.nvidiaModel} · ready`
+          : "Piper · English only");
+      setText("#env-stt-model", !config.speechToText?.enabled
+        ? "Unavailable"
+        : `${config.speechToText.model} · key ready`);
+      setText("#env-search-model", !config.webSearch?.enabled
+        ? "Disabled"
+        : `Tavily · ${config.webSearch.tavilyConfigured ? "key configured" : "keyless"}`);
+    }
+
+    function renderSource() {
+      const source = sourceInputs.find((input) => input.checked)?.value || serverDefaultApiSource;
+      sourceInputs.forEach((input) => {
+        input.closest(".api-source-option")?.classList.toggle("selected", input.checked);
+      });
+      if (personalFields) personalFields.hidden = source !== "browser";
+      renderEnvConfig(source);
+      if (sourceHint) {
+        const selectedProvider = providerSelect?.selectedOptions[0]?.textContent || "provider";
+        if (!serverConfigStatus) {
+          sourceHint.textContent = "Server configuration is unavailable. Reconnect before saving API settings.";
+        } else if (!serverConfigStatus.chat?.enabled) {
+          sourceHint.textContent = "AI chat is disabled by the server's AI_ENABLED setting.";
+        } else if (source === "env") {
+          const configured = serverConfigStatus.chat.providers?.find(
+            (item) => item.name === serverConfigStatus.chat.defaultProvider,
+          )?.configured;
+          sourceHint.textContent = configured
+            ? `Using ${serverConfigStatus.chat.defaultProvider} · ${serverStatusModel(serverConfigStatus.chat.defaultProvider)} from the server environment.`
+            : "Server mode is selected, but the default provider key is missing from the server environment.";
+        } else {
+          sourceHint.textContent = `Your ${selectedProvider} key will be used with the model configured for that provider in the server environment.`;
+        }
+      }
+      if (chatKey) chatKey.required = source === "browser";
+      if (summary) {
+        if (source === "browser") {
+          summary.textContent = userSettings.chatApiKey
+            ? `Personal keys · ${providerSelect?.selectedOptions[0]?.textContent || "provider"} · ${serverStatusModel(providerSelect?.value)}`
+            : "Personal API keys required";
+        } else if (serverConfigStatus?.chat?.providers?.some(
+          (item) => item.name === serverConfigStatus.chat.defaultProvider && item.configured,
+        )) {
+          summary.textContent = `Server .env · ${serverConfigStatus.chat.defaultProvider} · ${serverStatusModel(serverConfigStatus.chat.defaultProvider)}`;
+        } else if (serverConfigStatus && !serverConfigStatus.chat?.enabled) {
+          summary.textContent = "AI disabled on server";
+        } else {
+          summary.textContent = "Server key not configured";
+        }
+      }
+    }
+
+    function serverStatusModel(name) {
+      return serverConfigStatus?.chat?.providers?.find((item) => item.name === name)?.model || "model not configured";
+    }
+
+    sourceInputs.forEach((input) => {
+      input.checked = (userSettings.apiSource || serverDefaultApiSource) === input.value;
+      input.addEventListener("change", () => {
+        sourceWasChanged = true;
+        renderSource();
+      });
+    });
     if (providerSelect) providerSelect.value = userSettings.chatProvider || "groq";
     if (chatKey) chatKey.value = userSettings.chatApiKey || "";
     if (fishKey) fishKey.value = userSettings.fishAudioApiKey || "";
     if (sttKey) sttKey.value = userSettings.sttApiKey || "";
-    if (userSettings.chatApiKey || userSettings.fishAudioApiKey || userSettings.sttApiKey) {
-      if (panel) panel.open = false;
-      if (summary) summary.textContent = "Personal keys saved in this browser";
-    }
+    if (tavilyKey) tavilyKey.value = userSettings.tavilyApiKey || "";
+    renderSource();
 
     document.querySelector(".show-api-keys")?.addEventListener("change", (event) => {
       inputs.forEach((input) => {
@@ -178,17 +334,30 @@
           status.dataset.tone = "error";
         }
       }
+      renderSource();
     });
 
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const next = {
+        apiSource: sourceInputs.find((input) => input.checked)?.value || serverDefaultApiSource,
         chatProvider: providerSelect?.value || "groq",
         chatApiKey: chatKey?.value.trim() || "",
         fishAudioApiKey: fishKey?.value.trim() || "",
         sttApiKey: sttKey?.value.trim() || "",
+        tavilyApiKey: tavilyKey?.value.trim() || "",
       };
-      if (Object.values(next).some((value) => typeof value === "string" && value) && !window.isSecureContext) {
+      if (next.apiSource === "browser" && !next.chatApiKey) {
+        if (status) {
+          status.textContent = "Add the selected provider's API key before saving Personal keys mode.";
+          status.dataset.tone = "error";
+        }
+        chatKey?.focus();
+        return;
+      }
+      if (next.apiSource === "browser" &&
+        [next.chatApiKey, next.fishAudioApiKey, next.sttApiKey, next.tavilyApiKey].some(Boolean) &&
+        !window.isSecureContext) {
         if (status) {
           status.textContent = "API keys require a secure HTTPS connection on this device. Configure HTTPS for the server, then reopen this page.";
           status.dataset.tone = "error";
@@ -199,14 +368,12 @@
         localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
         userSettings = next;
         refreshServerSpeech();
+        renderSource();
         if (status) {
-          status.textContent = "Settings saved in this browser. Keys are sent only with the requests that need them.";
+          status.textContent = next.apiSource === "env"
+            ? "Server .env mode saved for this browser. Personal keys are ignored."
+            : "Personal keys mode saved in this browser. Keys are stored locally and sent only for provider requests.";
           status.dataset.tone = "success";
-        }
-        if (summary) {
-          summary.textContent = next.chatApiKey || next.fishAudioApiKey || next.sttApiKey
-            ? "Personal keys saved in this browser"
-            : `Provider preference saved: ${next.chatProvider}`;
         }
         if (panel) panel.open = false;
       } catch (error) {
@@ -230,8 +397,10 @@
         const showKeys = document.querySelector(".show-api-keys");
         if (showKeys) showKeys.checked = false;
         if (providerSelect) providerSelect.value = "groq";
+        sourceWasChanged = false;
+        sourceInputs.forEach((input) => { input.checked = input.value === serverDefaultApiSource; });
+        renderSource();
         if (panel) panel.open = true;
-        if (summary) summary.textContent = "Add your own keys or use the server defaults";
         if (status) {
           status.textContent = "Saved keys cleared from this browser. Server-configured defaults are unchanged.";
           status.dataset.tone = "success";
@@ -249,28 +418,36 @@
       if (event.key !== SETTINGS_STORAGE_KEY) return;
       userSettings = loadUserSettings();
       refreshServerSpeech();
+      sourceInputs.forEach((input) => { input.checked = (userSettings.apiSource || serverDefaultApiSource) === input.value; });
       if (providerSelect) providerSelect.value = userSettings.chatProvider || providerSelect.value;
       if (chatKey) chatKey.value = userSettings.chatApiKey || "";
       if (fishKey) fishKey.value = userSettings.fishAudioApiKey || "";
       if (sttKey) sttKey.value = userSettings.sttApiKey || "";
+      if (tavilyKey) tavilyKey.value = userSettings.tavilyApiKey || "";
+      renderSource();
     });
 
     fetch("/api/status")
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (!data) return;
+        serverConfigStatus = data;
+        serverDefaultApiSource = data.defaultApiSource === "browser" ? "browser" : "env";
+        configuredServerSpeech = Boolean(data.speechToText?.enabled);
+        acceptsBrowserSttKey = Boolean(data.speechToText?.acceptsBrowserKey);
+        if (!userSettings.apiSource && !sourceWasChanged) {
+          sourceInputs.forEach((input) => { input.checked = input.value === serverDefaultApiSource; });
+        }
+        refreshServerSpeech();
         if (providerSelect && !userSettings.chatProvider && !providerWasChanged && data.chat?.defaultProvider) {
           providerSelect.value = data.chat.defaultProvider;
         }
-        if (summary && !userSettings.chatApiKey && !userSettings.fishAudioApiKey && !userSettings.sttApiKey) {
-          summary.textContent = !data.chat?.enabled
-            ? "AI chat is disabled in server settings"
-            : data.chat?.configured
-              ? `Server default: ${data.chat.defaultProvider} · add personal keys if desired`
-              : `Selected: ${providerSelect?.value || data.chat?.defaultProvider || "provider"} · add a key to start`;
-        }
+        renderSource();
       })
-      .catch((error) => console.warn("Could not load provider status:", error.message));
+      .catch((error) => {
+        console.warn("Could not load provider status:", error.message);
+        renderSource();
+      });
   }
 
   function inKiosk() {
@@ -362,6 +539,7 @@
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || `Request failed (${response.status}).`);
+    if (endpoint === "/api/chat") saveChatNotes(result.notes);
     return result;
   }
 
@@ -399,6 +577,111 @@
     log.append(item);
     log.scrollTop = log.scrollHeight;
     return item;
+  }
+
+  function createGraphicSvg(graphic) {
+    const svgNamespace = "http://www.w3.org/2000/svg";
+    const colorPattern = /^#[\da-f]{6}$/i;
+    if (!graphic || typeof graphic.title !== "string" ||
+        !colorPattern.test(graphic.background) || !Array.isArray(graphic.elements) ||
+        graphic.elements.length > 14) {
+      console.warn("Rejected an invalid generated graphic.");
+      return null;
+    }
+    const svg = document.createElementNS(svgNamespace, "svg");
+    svg.setAttribute("viewBox", "0 0 320 220");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", graphic.title);
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    const background = document.createElementNS(svgNamespace, "rect");
+    background.setAttribute("width", "320");
+    background.setAttribute("height", "220");
+    background.setAttribute("fill", graphic.background);
+    svg.append(background);
+
+    for (const item of graphic.elements) {
+      if (!item || !colorPattern.test(item.color) ||
+          !["circle", "rect", "line", "text"].includes(item.shape)) continue;
+      const shape = document.createElementNS(svgNamespace, item.shape);
+      shape.setAttribute("fill", item.shape === "line" ? "none" : item.color);
+      if (item.shape !== "line") {
+        shape.setAttribute("x", String(item.x));
+        shape.setAttribute("y", String(item.y));
+      }
+      if (item.shape === "circle") {
+        shape.setAttribute("cx", String(item.x));
+        shape.setAttribute("cy", String(item.y));
+        shape.setAttribute("r", String(item.radius));
+      } else if (item.shape === "rect") {
+        shape.setAttribute("width", String(item.width));
+        shape.setAttribute("height", String(item.height));
+        shape.setAttribute("rx", "8");
+      } else if (item.shape === "line") {
+        shape.setAttribute("x1", String(item.x));
+        shape.setAttribute("y1", String(item.y));
+        shape.setAttribute("x2", String(item.x2));
+        shape.setAttribute("y2", String(item.y2));
+        shape.setAttribute("stroke", item.color);
+        shape.setAttribute("stroke-width", "4");
+        shape.setAttribute("stroke-linecap", "round");
+      } else if (item.shape === "text") {
+        if (typeof item.text !== "string" || item.text.length > 80) continue;
+        shape.setAttribute("fill", item.color);
+        shape.setAttribute("font-size", String(item.size));
+        shape.setAttribute("font-family", "system-ui, sans-serif");
+        shape.setAttribute("font-weight", "600");
+        shape.textContent = item.text;
+      }
+      svg.append(shape);
+    }
+    return svg;
+  }
+
+  function renderGraphic(graphic) {
+    const svg = createGraphicSvg(graphic);
+    if (!svg) return;
+    if (mode === "display" && graphicDisplayCard && graphicDisplayTitle && graphicDisplayArt) {
+      graphicDisplayTitle.textContent = graphic.title;
+      graphicDisplayArt.replaceChildren(svg);
+      graphicDisplayCard.hidden = false;
+      return;
+    }
+    const log = document.querySelector("#chat-log");
+    if (!log) return;
+    const card = document.createElement("article");
+    card.className = "chat-graphic";
+    const title = document.createElement("strong");
+    title.textContent = graphic.title;
+    card.append(title, svg);
+    log.append(card);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderToolStatus() {
+    const container = document.querySelector("#tool-status");
+    if (!container) return;
+    container.replaceChildren();
+    if (toolStatusMessage) {
+      const message = document.createElement("p");
+      message.textContent = toolStatusMessage;
+      container.append(message);
+    }
+    for (const timer of activeToolTimers.values()) {
+      const chip = document.createElement("span");
+      chip.className = "tool-timer-chip";
+      const remaining = Math.max(0, Math.ceil((timer.dueAt - Date.now()) / 1000));
+      const minutes = Math.floor(remaining / 60);
+      const seconds = remaining % 60;
+      chip.textContent = `${timer.label} · ${minutes}:${String(seconds).padStart(2, "0")}`;
+      container.append(chip);
+    }
+    container.hidden = container.childElementCount === 0;
+    if (activeToolTimers.size && !toolStatusInterval) {
+      toolStatusInterval = window.setInterval(renderToolStatus, 1000);
+    } else if (!activeToolTimers.size && toolStatusInterval) {
+      window.clearInterval(toolStatusInterval);
+      toolStatusInterval = 0;
+    }
   }
 
   function showDeviceAction(action) {
@@ -513,6 +796,10 @@
     clearAudio();
   }
 
+  document.querySelector("#graphic-display-dismiss")?.addEventListener("click", () => {
+    if (graphicDisplayCard) graphicDisplayCard.hidden = true;
+  });
+
   function connectEvents() {
     const events = new EventSource("/api/events");
     const on = (name, handler) => {
@@ -557,6 +844,23 @@
     });
 
     on("device-action", showDeviceAction);
+
+    on("graphic-created", renderGraphic);
+
+    on("timer-created", (timer) => {
+      if (typeof timer?.id !== "string" || !Number.isFinite(timer.dueAt)) return;
+      activeToolTimers.set(timer.id, timer);
+      renderToolStatus();
+      if (mode === "display") showToast(`${timer.label || "Timer"} started.`);
+    });
+
+    on("timer-complete", (timer) => {
+      if (timer?.id) activeToolTimers.delete(timer.id);
+      toolStatusMessage = `${timer?.label || "Your timer"} is finished.`;
+      renderToolStatus();
+      showToast(toolStatusMessage, 8000);
+      if (mode === "control") addChatMessage(toolStatusMessage, "bot");
+    });
 
     on("user-message", ({ text }) => {
       stopMoodCycle();
@@ -960,6 +1264,7 @@
             method: "POST",
             headers: {
               "Content-Type": blob.type || "audio/webm",
+              "X-Twinkle-Api-Source": activeApiSource(),
               ...(sttApiKey() ? { "X-Twinkle-Stt-Key": sttApiKey() } : {}),
             },
             body: blob,
@@ -1327,6 +1632,15 @@
     const sayInput = document.querySelector("#say-input");
 
     setupRecognition(voiceButton);
+
+    document.querySelectorAll(".tool-prompts [data-prompt]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (!messageInput) return;
+        messageInput.value = button.dataset.prompt;
+        messageInput.focus();
+        messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
+      });
+    });
 
     async function sendControl(payload) {
       try {
