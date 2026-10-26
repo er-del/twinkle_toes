@@ -814,29 +814,59 @@
     renderVoiceControl();
   }
 
-  function attachAudio(audio, generation) {
+  function startBrowserSpeech(text, generation, message = "Using this browser's built-in voice.") {
+    if (generation !== speechGeneration || !("speechSynthesis" in window) ||
+      typeof SpeechSynthesisUtterance === "undefined") {
+      return false;
+    }
+    if (browserUtterance) return true;
+    speechAbort?.abort();
+    speechAbort = null;
+    if (audioPlayback) {
+      audioPlayback.onended = null;
+      audioPlayback.onerror = null;
+    }
+    audioPlayback?.pause();
+    if (speech?.src.startsWith("blob:")) URL.revokeObjectURL(speech.src);
+    speech = null;
+    audioPlayback = null;
+    browserUtterance = new SpeechSynthesisUtterance(text);
+    browserUtterance.lang = /[\u0900-\u097f]/.test(text) ? "hi-IN" : "en-US";
+    browserUtterance.onend = () => finishSpeech(generation);
+    browserUtterance.onerror = () => finishSpeech(generation);
+    window.speechSynthesis.speak(browserUtterance);
+    setNote(message);
+    return true;
+  }
+
+  function attachAudio(audio, generation, text) {
     speech = audio;
     audioPlayback = audio;
     audio.onended = () => finishSpeech(generation);
     audio.onerror = () => {
       if (generation !== speechGeneration) return;
-      setNote("The audio could not play on this device.", "error");
-      finishSpeech(generation);
+      speechAbort?.abort();
+      speechAbort = null;
+      if (!startBrowserSpeech(text, generation, "Audio playback failed; using this browser's built-in voice.")) {
+        setNote("The audio could not play on this device.", "error");
+        finishSpeech(generation);
+      }
     };
   }
 
-  async function playSpeechResponse(response, generation) {
+  async function playSpeechResponse(response, generation, text) {
     const contentType = (response.headers.get("content-type") || "").split(";")[0].trim();
     if (!response.body || typeof window.MediaSource !== "function" ||
       !window.MediaSource.isTypeSupported(contentType)) {
       const audio = new Audio(URL.createObjectURL(await response.blob()));
-      attachAudio(audio, generation);
+      attachAudio(audio, generation, text);
       return audio.play();
     }
 
     const mediaSource = new window.MediaSource();
-    const audio = new Audio(URL.createObjectURL(mediaSource));
-    attachAudio(audio, generation);
+    const mediaSourceUrl = URL.createObjectURL(mediaSource);
+    const audio = new Audio(mediaSourceUrl);
+    attachAudio(audio, generation, text);
     await new Promise((resolve, reject) => {
       if (mediaSource.readyState === "open") {
         resolve();
@@ -851,6 +881,26 @@
 
     const sourceBuffer = mediaSource.addSourceBuffer(contentType);
     const reader = response.body.getReader();
+    const audioChunks = [];
+    const playBufferedAudio = async () => {
+      while (generation === speechGeneration) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        audioChunks.push(value.slice());
+      }
+      if (generation !== speechGeneration) return;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute("src");
+      URL.revokeObjectURL(mediaSourceUrl);
+      const bufferedAudio = new Audio(URL.createObjectURL(
+        new Blob(audioChunks, { type: contentType || "audio/mpeg" }),
+      ));
+      attachAudio(bufferedAudio, generation, text);
+      await bufferedAudio.play();
+      setNote("Streaming audio failed; playing the completed audio instead.");
+    };
     let started = false;
     while (generation === speechGeneration) {
       const { done, value } = await reader.read();
@@ -858,28 +908,41 @@
         if (mediaSource.readyState === "open") mediaSource.endOfStream();
         return;
       }
-      await new Promise((resolve, reject) => {
-        const onUpdate = () => {
-          sourceBuffer.removeEventListener("error", onError);
-          resolve();
-        };
-        const onError = () => {
-          sourceBuffer.removeEventListener("updateend", onUpdate);
-          reject(new Error("The audio stream could not be decoded."));
-        };
-        sourceBuffer.addEventListener("updateend", onUpdate, { once: true });
-        sourceBuffer.addEventListener("error", onError, { once: true });
-        try {
-          sourceBuffer.appendBuffer(value);
-        } catch (error) {
-          sourceBuffer.removeEventListener("updateend", onUpdate);
-          sourceBuffer.removeEventListener("error", onError);
-          reject(error);
-        }
-      });
+      audioChunks.push(value.slice());
+      try {
+        await new Promise((resolve, reject) => {
+          const onUpdate = () => {
+            sourceBuffer.removeEventListener("error", onError);
+            resolve();
+          };
+          const onError = () => {
+            sourceBuffer.removeEventListener("updateend", onUpdate);
+            reject(new Error("The audio stream could not be decoded."));
+          };
+          sourceBuffer.addEventListener("updateend", onUpdate, { once: true });
+          sourceBuffer.addEventListener("error", onError, { once: true });
+          try {
+            sourceBuffer.appendBuffer(value);
+          } catch (error) {
+            sourceBuffer.removeEventListener("updateend", onUpdate);
+            sourceBuffer.removeEventListener("error", onError);
+            reject(error);
+          }
+        });
+      } catch (error) {
+        console.warn("Streaming audio could not be decoded; buffering the audio:", error.message);
+        await playBufferedAudio();
+        return;
+      }
       if (!started) {
         started = true;
-        await audio.play();
+        try {
+          await audio.play();
+        } catch (error) {
+          console.warn("Streaming audio could not start; buffering the audio:", error.message);
+          await playBufferedAudio();
+          return;
+        }
       }
     }
     await reader.cancel();
@@ -905,19 +968,11 @@
           throw new Error(result.error || `Voice request failed (${response.status}).`);
         }
         if (generation !== speechGeneration) return;
-        return playSpeechResponse(response, generation);
+        return playSpeechResponse(response, generation, text);
       })
       .catch((error) => {
         if (error.name === "AbortError" || generation !== speechGeneration) return;
-        if ("speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined") {
-          browserUtterance = new SpeechSynthesisUtterance(text);
-          browserUtterance.lang = /[\u0900-\u097f]/.test(text) ? "hi-IN" : "en-US";
-          browserUtterance.onend = () => finishSpeech(generation);
-          browserUtterance.onerror = () => finishSpeech(generation);
-          window.speechSynthesis.speak(browserUtterance);
-          setNote("Using this browser's built-in voice.");
-          return;
-        }
+        if (startBrowserSpeech(text, generation)) return;
         setNote(error.message, "error");
         showToast(error.message, 7000);
         finishSpeech(generation);
