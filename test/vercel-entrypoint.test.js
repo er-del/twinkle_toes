@@ -82,3 +82,43 @@ test("serves status and refuses unscoped shared-state requests on Vercel", () =>
   assert.equal(responses[2].status, 403);
   assert.match(JSON.parse(responses[2].body).error, /Personal keys/);
 });
+
+test("polls room events through the configured Vercel store", () => {
+  const script = `
+    process.env.VERCEL = "1";
+    process.env.UPSTASH_REDIS_REST_URL = "https://redis.example";
+    process.env.UPSTASH_REDIS_REST_TOKEN = "test-token";
+    global.fetch = async () => ({ ok: true, json: async () => ({ result: [] }) });
+    const { Readable } = require("node:stream");
+    const handler = require("./api/[...path].js");
+    const req = Readable.from([]);
+    req.method = "GET";
+    req.url = "/api/events?since=0";
+    req.headers = {
+      host: "localhost",
+      "x-twinkle-session": "a8c0020e-3d49-44fb-aab6-d4ea807eb328"
+    };
+    const res = {
+      headersSent: false,
+      setHeader() {},
+      writeHead(status) { this.statusCode = status; this.headersSent = true; },
+      end(body) {
+        console.log(JSON.stringify({ status: this.statusCode, body: JSON.parse(String(body)) }));
+      }
+    };
+    handler(req, res);
+  `;
+  const result = spawnSync(process.execPath, ["-e", script], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, VERCEL: "1" },
+    timeout: 5000,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const response = JSON.parse(result.stdout.trim());
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.events, []);
+  assert.equal(response.body.cursor, "0");
+  assert.equal(response.body.pollIntervalMs, 2500);
+});

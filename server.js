@@ -773,7 +773,7 @@ async function handle(request, response) {
   if (isEventPoll) {
     const localCursor = recentEvents.findIndex((event) => event.id === cursor);
     const batch = isVercel
-      ? await vercelStore.getEventBatch(cursor)
+      ? await currentStore().getEventBatch(cursor)
       : {
           events: cursor === "0"
             ? recentEvents
